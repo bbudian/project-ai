@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\ProjectAI.Core\ProjectAI.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- TensorPrimitives + SIMD span ops for the managed reference backend. -->
+    <PackageReference Include="System.Numerics.Tensors" Version="10.0.9" />
+  </ItemGroup>
+</Project>

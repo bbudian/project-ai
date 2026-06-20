@@ -4,3 +4,11 @@ obj/
 riderModule.iml
 /_ReSharper.Caches/
 .idea
+
+# ML artifacts & local tooling
+*.user
+[Cc]heckpoints/
+*.safetensors
+*.gguf
+*.ckpt
+.dotnet/

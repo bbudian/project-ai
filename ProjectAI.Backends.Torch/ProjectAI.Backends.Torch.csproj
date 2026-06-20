@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\ProjectAI.Core\ProjectAI.Core.csproj" />
+  </ItemGroup>
+  <!-- Stage 2: add TorchSharp 0.107.0 + a platform libtorch bundle.
+       Windows / RTX 4090:  <PackageReference Include="TorchSharp-cuda-windows" Version="0.106.0" />
+       macOS / CPU:         <PackageReference Include="TorchSharp" Version="0.107.0" />
+                            <PackageReference Include="libtorch-cpu" Version="2.10.0.1" /> -->
+</Project>

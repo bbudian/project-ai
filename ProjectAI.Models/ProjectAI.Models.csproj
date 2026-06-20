@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\ProjectAI.Core\ProjectAI.Core.csproj" />
+  </ItemGroup>
+</Project>

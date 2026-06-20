@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\ProjectAI.Core\ProjectAI.Core.csproj" />
+  </ItemGroup>
+  <!-- Stage 2: hand-written compute backend.
+       <PackageReference Include="Silk.NET.Vulkan" Version="2.23.0" />
+       <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" Version="2.23.0" />
+       On macOS, Vulkan calls reach Metal through the bundled MoltenVK 1.4.1. -->
+</Project>

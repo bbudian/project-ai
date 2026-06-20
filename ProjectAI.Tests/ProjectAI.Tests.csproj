@@ -1,17 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
-
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <AssemblyName>projectai</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
   </PropertyGroup>
-
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.0" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\ProjectAI.Core\ProjectAI.Core.csproj" />
     <ProjectReference Include="..\ProjectAI.Backends.Cpu\ProjectAI.Backends.Cpu.csproj" />
-    <ProjectReference Include="..\ProjectAI.Tokenizers\ProjectAI.Tokenizers.csproj" />
-    <ProjectReference Include="..\ProjectAI.Formats\ProjectAI.Formats.csproj" />
     <ProjectReference Include="..\ProjectAI.Models\ProjectAI.Models.csproj" />
-    <ProjectReference Include="..\ProjectAI.Training\ProjectAI.Training.csproj" />
   </ItemGroup>
-
 </Project>
