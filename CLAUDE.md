@@ -90,10 +90,12 @@ dotnet run --project ProjectAI -- help
 ```
 
 ## Status
-Stage 0 in progress. Done: the scaffold + **S0-1** — the `Tensor`/`Shape` value types now carry
-row-major strides, NumPy-style broadcasting, and zero-copy views (`Reshape`/`Transpose`/`Permute`/
-`Slice`) over shared storage, with a stride-aware `ToHost` that materializes any view. CPU elementwise
-ops are real; remaining ops are stubs whose `NotImplementedException` messages cite their ticket IDs.
-The solution builds clean and `dotnet test` is green (18 passing, 1 skipped — the S0-4 placeholder).
-Next: **S0-3** (CPU GEMM + reductions) and **S0-4** (reverse-mode autograd), gated by the **S0-6**
-gradient-check harness. See `docs/BUILD_PLAN.md`.
+Stage 0 in progress. Done: the scaffold, **S0-1** (the `Tensor`/`Shape` value types — row-major
+strides, NumPy-style broadcasting, zero-copy views (`Reshape`/`Transpose`/`Permute`/`Slice`) and a
+stride-aware `ToHost`), and **S0-2/S0-3** (the `IComputeBackend` op set incl. axis reductions, plus
+the CPU oracle's batched GEMM, `Sum`/`Mean`/`Max`, and broadcasting/non-contiguous elementwise —
+validated against an independent double-precision reference). Remaining ops are stubs whose
+`NotImplementedException` messages cite their ticket IDs. The solution builds clean and `dotnet test`
+is green (63 passing, 1 skipped — the S0-4 placeholder).
+Next: **S0-4** (reverse-mode autograd), then **S0-5** (AdamW), gated by the **S0-6** gradient-check
+harness. See `docs/BUILD_PLAN.md`.

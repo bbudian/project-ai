@@ -21,7 +21,10 @@ public sealed class VulkanComputeBackend(Device device) : IComputeBackend
     public Tensor Mul(Tensor a, Tensor b) => throw new NotImplementedException("Stage 2.");
     public Tensor AddScalar(Tensor a, float scalar) => throw new NotImplementedException("Stage 2.");
     public Tensor MulScalar(Tensor a, float scalar) => throw new NotImplementedException("Stage 2.");
-    public Tensor MatMul(Tensor a, Tensor b, bool transposeB = false) => throw new NotImplementedException("Stage 2.");
+    public Tensor MatMul(Tensor a, Tensor b, bool transposeB = false) => throw new NotImplementedException("Stage 2 — ticket S2-5.");
+    public Tensor Sum(Tensor x, int axis, bool keepDims = false) => throw new NotImplementedException("Stage 2 — ticket S2-5.");
+    public Tensor Mean(Tensor x, int axis, bool keepDims = false) => throw new NotImplementedException("Stage 2 — ticket S2-5.");
+    public Tensor Max(Tensor x, int axis, bool keepDims = false) => throw new NotImplementedException("Stage 2 — ticket S2-5.");
     public Tensor Softmax(Tensor x, int axis) => throw new NotImplementedException("Stage 2.");
     public Tensor RmsNorm(Tensor x, Tensor weight, float eps) => throw new NotImplementedException("Stage 2.");
     public Tensor Silu(Tensor x) => throw new NotImplementedException("Stage 2.");

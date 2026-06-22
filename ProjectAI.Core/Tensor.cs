@@ -135,6 +135,35 @@ public sealed class Tensor
     }
 
     /// <summary>
+    /// Returns a view broadcast to <paramref name="target"/> following NumPy rules: axes are aligned on
+    /// the right, and each size-1 axis (or newly-introduced leading axis) is given a stride of 0 so reads
+    /// repeat that element. No data is copied. Throws if this shape is not broadcastable to the target.
+    /// </summary>
+    public Tensor BroadcastTo(Shape target)
+    {
+        var src = Shape.Dimensions;
+        var tgt = target.Dimensions;
+        if (src.Length > tgt.Length)
+            throw new ArgumentException($"Cannot broadcast {Shape} to fewer dimensions {target}.");
+
+        int lead = tgt.Length - src.Length;            // new leading axes the source lacks
+        var newStrides = new long[tgt.Length];
+        for (int i = 0; i < tgt.Length; i++)
+        {
+            if (i < lead)
+            {
+                newStrides[i] = 0;                      // brand-new leading axis: repeat
+                continue;
+            }
+            int s = src[i - lead];
+            if (s == tgt[i]) newStrides[i] = Strides[i - lead];
+            else if (s == 1) newStrides[i] = 0;         // size-1 axis: repeat
+            else throw new ArgumentException($"Cannot broadcast {Shape} to {target}: axis {i} ({s} vs {tgt[i]}).");
+        }
+        return new Tensor(target, newStrides, Offset, DType, Device, Handle, RequiresGrad);
+    }
+
+    /// <summary>
     /// Enumerates the physical element offsets into <see cref="Handle"/> in logical row-major order.
     /// Backends use this to gather a (possibly strided) view into a contiguous buffer.
     /// </summary>

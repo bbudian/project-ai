@@ -141,9 +141,11 @@ never call its `torch.nn` model layer.
 **Outcome:** a hand-written, CPU-only tensor engine with reverse-mode autodiff and AdamW, proven
 correct by finite-difference gradient checks. No GPU, no model yet — just a foundation you trust.
 
-Scaffold status: value types, `IComputeBackend`, `Module`, `GradNode`, and `AdamW` exist as
-compiling stubs; elementwise CPU ops (`Add`/`Mul`/`AddScalar`/`MulScalar`) are already implemented
-against `TensorPrimitives`.
+Scaffold status: value types, `IComputeBackend`, `Module`, `GradNode`, and `AdamW` exist as compiling
+stubs. **S0-1/S0-2/S0-3 are done**: the CPU oracle implements elementwise ops (with broadcasting and
+non-contiguous/strided support), batched `MatMul` (incl. `transposeB`), and axis `Sum`/`Mean`/`Max`,
+all validated against an independent double-precision reference. Autograd (`Tensor.Backward`) and
+`AdamW.Step` remain stubs citing their tickets.
 
 ### S0-1 — Finalize core value types
 - **Files:** `Core/Tensor.cs`, `Core/Shape.cs`, `Core/DType.cs`, `Core/Device.cs`

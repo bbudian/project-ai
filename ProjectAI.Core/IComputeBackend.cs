@@ -27,6 +27,14 @@ public interface IComputeBackend : IDisposable
     /// <summary>Batched matrix multiply. <paramref name="transposeB"/> fuses the common weight transpose.</summary>
     Tensor MatMul(Tensor a, Tensor b, bool transposeB = false);
 
+    // --- Reductions (along a single axis; negative axis counts from the end) ---
+    /// <summary>Sum along <paramref name="axis"/>. When <paramref name="keepDims"/> is false the reduced axis is removed.</summary>
+    Tensor Sum(Tensor x, int axis, bool keepDims = false);
+    /// <summary>Arithmetic mean along <paramref name="axis"/>.</summary>
+    Tensor Mean(Tensor x, int axis, bool keepDims = false);
+    /// <summary>Maximum along <paramref name="axis"/>.</summary>
+    Tensor Max(Tensor x, int axis, bool keepDims = false);
+
     // --- Transformer primitives (kept on the seam so each backend can fuse them) ---
     Tensor Softmax(Tensor x, int axis);
     Tensor RmsNorm(Tensor x, Tensor weight, float eps);
