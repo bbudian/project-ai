@@ -259,13 +259,55 @@ Scaffold status: `ModelConfig`, `RmsNorm`, `RotaryEmbedding`, `Attention`, `SwiG
 `TransformerBlock`, `LlamaModel`, `KvCache`, samplers, BPE, safetensors/GGUF loaders, and `Trainer`
 all exist as compiling stubs with matching ticket IDs.
 
+**S1-2 is done**: numerically-stable `Softmax`, `RmsNorm`, `SiLU`, and rotate-half `RoPE` are implemented
+on the CPU oracle (plus a `Sigmoid` seam op), each with a differentiable `Autograd` wrapper whose
+closed-form backward passes finite-difference gradient checks (incl. middle-axis softmax, broadcast RoPE,
+and multi-leading-axis RMSNorm weight grads).
+
+**S1-1 is done** (except the external-tokenizer-parity sub-criterion, deferred — see the ticket):
+`BpeTokenizer` + `BpeTrainer` provide byte-level BPE with deterministic training (most-frequent pair,
+smallest-pair tie-break), lossless roundtrip on well-formed UTF-8 (encode fails fast on ill-formed UTF-16),
+BOS/EOS/PAD specials, and JSON save/load with merge-reference validation.
+
+**S0-7/S0-8/S0-9 + S1-6 are done** (model foundation, judge-panel-designed): seedable `PcgRng` (matches the
+canonical PCG vector) + centralized `Tolerances`; parameter `Init` (Zeros/Ones/Normal/Xavier/Kaiming, RNG-
+reproducible); the `Module` contract — `ParameterContext` bundle, a single `Param(name,shape,init)` birthplace
+(keeps AdamW's reference-keyed state safe), `NamedParameters`, and `Forward(input, ForwardContext)` carrying
+mask/positions/`IKvCache` so attention needs no later Core change; plus the modules `Linear`, `RmsNorm`,
+`RotaryEmbedding`, `SwiGluFeedForward` (and a differentiable `Autograd.Contiguous` + `MatMul(transposeB)`), each
+gradient-checked. Param init consumes the RNG sequentially (reproducible but construction-order dependent).
+
+**S1-3 is done**: token `Embedding` (seam `Gather`/`ScatterAddRows`; backward scatter-adds to used rows only,
+repeated ids accumulate), a fused numerically-stable `CrossEntropy` + `CrossEntropyGrad` (ignore-index,
+bounds-checked targets, mean over valid rows), `Loss.CrossEntropy` (flattens rank-3 logits), and tied-LM-head
+support — gradient-checked incl. embedding, CE (with ignore-index), and weight tying summing both paths.
+
+**S1-7 is done** (full-sequence/training path; the KV-cache **decode** path is deferred to S1-7b, inference-only):
+`Autograd.MatMul` is now batched (rank ≥ 2) with `ReduceGradToShape` folding broadcasted batch dims (incl. the
+GQA group reduction); the `Attention` module composes Q/K/V/O `Linear`s, RoPE on Q/K, grouped-query sharing via
+a size-1 broadcast group axis, scaled scores, a causal mask, softmax, and the output projection. Validated vs a
+hand-rolled reference (1e-4) for MHA/GQA/MQA, gradient-checked (incl. the group reduction and rank-mismatch
+matmul), causal, with `ModelConfig.Validate()` rejecting impossible head configs. (A `Reshape`-backward bug —
+non-contiguous upstream grad from a transpose feeding a reshape — was found by the attention gradient check and
+fixed.)
+
+**S1-8 is done — the model runs end-to-end.** `TransformerBlock.Forward` (pre-norm residual) and `LlamaModel`
+(token `Embedding` → N blocks → final `RmsNorm` → LM head tied to the embedding weight) produce logits
+`[batch, seq, vocab]`. An overfit test trains the whole stack to ~0 loss and greedily reproduces a fixed
+sequence; `projectai train [prompt]` trains a tiny byte-level LLaMA from scratch (~140k params, loss 5.6→0.003
+in ~15s on the CPU oracle) and generates the corpus from a prompt — the first fully hand-written LLM training +
+generating. (Generation re-runs the full sequence each step; the KV-cache decode optimization is S1-7b.)
+
 ### S1-1 — BPE tokenizer
 - **Files:** `Tokenizers/Tokenizer.cs`, `Tokenizers/BpeTrainer.cs` (new)
 - **Do:** byte-level BPE (GPT-2/Llama style): train merges from a corpus, encode/decode, special
   tokens (BOS/EOS/PAD), save/load vocab+merges JSON.
-- **Acceptance:** `Decode(Encode(s)) == s` for a UTF-8 fuzz corpus incl. emoji/CJK; trained vocab
-  reproduces known merges on a fixed seed corpus; loads a published Llama tokenizer and matches its
-  token ids on a reference string.
+- **Acceptance:** `Decode(Encode(s)) == s` for a UTF-8 fuzz corpus incl. emoji/CJK *(done)*; trained
+  vocab reproduces known merges on a fixed seed corpus *(done)*; loads a published Llama tokenizer and
+  matches its token ids on a reference string *(**deferred** — Llama uses SentencePiece, a different
+  format/normalization; our own trained tokenizer suffices for from-scratch S1-10 training. A follow-up
+  ticket should add the external loader: GPT-2 `vocab.json`+`merges.txt`, HF `tokenizer.json`, or
+  SentencePiece, with a golden-id parity test).*
 - **Depends on:** — (parallelizable with all of Stage 0)
 
 ### S1-2 — Transformer numeric ops (CPU)

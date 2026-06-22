@@ -90,14 +90,30 @@ dotnet run --project ProjectAI -- help
 ```
 
 ## Status
-**Stage 0 is complete (S0-1 … S0-6).** The CPU oracle implements elementwise ops (incl. `Sub`/`Div`/
-`Sqrt`, with broadcasting and non-contiguous/strided support), batched `MatMul`, and axis `Sum`/`Mean`/
-`Max`, all validated against an independent double-precision reference. The `Autograd` facade +
-`Tensor.Backward` give reverse-mode autodiff — topo-order gradient accumulation, broadcast-aware grad
-reduction, differentiable view ops, and a `no_grad` scope. `AdamW` does bias-corrected updates with
-decoupled weight decay and a per-parameter timestep. Finite-difference gradient checks cover every
-differentiable op. The remaining backend stubs are the transformer primitives (`Softmax`/`RmsNorm`/
-`Silu`/`RotaryEmbedding`, ticket S1-2). `dotnet run --project ProjectAI -- demo` trains `y = Wx + b` to
-~0 loss and recovers the true parameters; `dotnet test` is green (84 passing, 0 skipped); clean build.
-Next: **Stage 1** — the first working LLM (BPE tokenizer → transformer modules → train/generate). See
-`docs/BUILD_PLAN.md`.
+**Stage 0 complete (S0-1 … S0-6); Stage 1 in progress.** Stage 0 gave a CPU oracle (elementwise incl.
+`Sub`/`Div`/`Sqrt`/`Sigmoid` with broadcasting + strided support, batched `MatMul`, axis reductions, all
+vs a double-precision reference), reverse-mode autograd (`Autograd` facade + `Tensor.Backward`:
+topo-order accumulation, broadcast-aware grad reduction, differentiable view ops, `no_grad`), and `AdamW`
+(decoupled weight decay, per-parameter timestep). **S1-2 done**: numerically-stable `Softmax`, `RmsNorm`,
+`SiLU`, rotate-half `RoPE` on the oracle, each with a differentiable `Autograd` wrapper (closed-form
+backward) that passes finite-difference gradient checks. **S1-1 done**: byte-level BPE tokenizer
+(`BpeTokenizer` + `BpeTrainer`) — deterministic training, lossless roundtrip on well-formed UTF-8
+(fail-fast on ill-formed UTF-16), special tokens, JSON save/load. `dotnet run --project ProjectAI --
+demo` trains `y = Wx + b` to ~0 loss; clean build. **S0-7/S0-8/S0-9 + S1-6 done**: seedable `PcgRng` +
+`Init` (Xavier/Kaiming/normal/…) + centralized `Tolerances`; the `Module` contract (`ParameterContext`,
+`Param`, `NamedParameters`, `Forward(input, ForwardContext)`, `IKvCache`); and the transformer modules
+`Linear`/`RmsNorm`/`RotaryEmbedding`/`SwiGluFeedForward` built on the autograd facade, each gradient-checked.
+**S1-3 done**: token `Embedding` (gather + scatter-add backward; gradient flows only to used rows), a
+numerically-stable fused `CrossEntropy` with ignore-index + bounds-checked targets, and tied-LM-head support
+(gradient-checked to sum both paths). **S1-7 done** (full-sequence/training path): batched (rank≥2) `MatMul`
+autograd; the GQA `Attention` module (Q/K/V/O projections, RoPE on Q/K, grouped-query head sharing via a
+size-1 broadcast group axis, scaled dot-product, causal mask, softmax, output projection) — validated against a
+hand-rolled reference (1e-4) for MHA/GQA/MQA, gradient-checked, causal, with config validation. **S1-8 done —
+the model is runnable end-to-end**: `TransformerBlock` (pre-norm residual) + `LlamaModel` (embedding → N blocks →
+final norm → tied LM head) → logits `[batch, seq, vocab]`. An overfit test trains the full model to ~0 loss and
+greedily reproduces a sequence, and `dotnet run --project ProjectAI -- train` trains a tiny byte-level LLaMA from
+scratch (loss 5.6→0.003 in ~15s) and generates the corpus from a prompt. `dotnet test` is green (180 passing, 0 skipped).
+Next in Stage 1: **S1-9** (samplers: temperature/top-k/top-p) → **S1-10** (real training loop: batching, LR
+schedule, checkpointing) → **S1-11** (CLI: separate `train`/`generate`/`convert` with saved checkpoints).
+(Deferred: KV-cache **decode** path S1-7b — inference-only; BPE external-tokenizer parity; `NamedParameters`
+ordering at S1-4 — see `docs/BUILD_PLAN.md`.)

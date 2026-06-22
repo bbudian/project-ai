@@ -26,6 +26,8 @@ public interface IComputeBackend : IDisposable
     Tensor MulScalar(Tensor a, float scalar);
     /// <summary>Elementwise square root.</summary>
     Tensor Sqrt(Tensor x);
+    /// <summary>Elementwise logistic sigmoid 1/(1+e^-x).</summary>
+    Tensor Sigmoid(Tensor x);
 
     // --- Linear algebra ---
     /// <summary>Batched matrix multiply. <paramref name="transposeB"/> fuses the common weight transpose.</summary>
@@ -44,4 +46,14 @@ public interface IComputeBackend : IDisposable
     Tensor RmsNorm(Tensor x, Tensor weight, float eps);
     Tensor Silu(Tensor x);
     Tensor RotaryEmbedding(Tensor x, Tensor cos, Tensor sin);
+
+    // --- Indexing & loss (ticket S1-3) ---
+    /// <summary>Gathers rows of <paramref name="table"/> ([vocab, dim]) by <paramref name="ids"/> → [ids.Length, dim].</summary>
+    Tensor Gather(Tensor table, int[] ids);
+    /// <summary>Scatter-adds rows of <paramref name="rows"/> ([N, dim]) into a zeroed [rowCount, dim] keyed by <paramref name="ids"/> (the embedding backward; repeated ids accumulate).</summary>
+    Tensor ScatterAddRows(Tensor rows, int[] ids, int rowCount);
+    /// <summary>Mean cross-entropy of <paramref name="logits"/> ([N, vocab]) vs integer <paramref name="targets"/>, skipping rows whose target == <paramref name="ignoreIndex"/>.</summary>
+    Tensor CrossEntropy(Tensor logits, int[] targets, int ignoreIndex);
+    /// <summary>Gradient of <see cref="CrossEntropy"/> w.r.t. logits: (softmax − onehot)/validCount, with ignored rows zeroed.</summary>
+    Tensor CrossEntropyGrad(Tensor logits, int[] targets, int ignoreIndex);
 }

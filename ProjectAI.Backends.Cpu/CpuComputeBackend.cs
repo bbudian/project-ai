@@ -180,7 +180,7 @@ public sealed class CpuComputeBackend : IComputeBackend
         var bufA = Materialize(a);
         var bufB = Materialize(b);
         long aBlock = (long)m * k;
-        long bBlock = (long)kb * n; // (transposeB) ? n*k : k*n — kb==k either way
+        long bBlock = (long)kb * n; // b's 2-D block size = kb*n (== k*n; for transposeB, b is [n,k] so kb==k)
 
         var outBuf = new float[batchCount * m * n];
         var counter = new int[batchDims.Length];
@@ -300,11 +300,204 @@ public sealed class CpuComputeBackend : IComputeBackend
         return new Tensor(new Shape(outDims), x.DType, Device, handle: outBuf);
     }
 
-    // --- Transformer primitives land in Stage 1 (see docs/BUILD_PLAN.md). ---
-    public Tensor Softmax(Tensor x, int axis) => throw new NotImplementedException("ticket S1-2.");
-    public Tensor RmsNorm(Tensor x, Tensor weight, float eps) => throw new NotImplementedException("ticket S1-2.");
-    public Tensor Silu(Tensor x) => throw new NotImplementedException("ticket S1-2.");
-    public Tensor RotaryEmbedding(Tensor x, Tensor cos, Tensor sin) => throw new NotImplementedException("ticket S1-2.");
+    /// <summary>Numerically-stable elementwise logistic sigmoid (sign-split to keep exp arguments ≤ 0).</summary>
+    public Tensor Sigmoid(Tensor x)
+    {
+        var src = Materialize(x);
+        var dst = new float[src.Length];
+        for (int i = 0; i < src.Length; i++) dst[i] = SigmoidScalar(src[i]);
+        return new Tensor(x.Shape, x.DType, Device, handle: dst);
+    }
+
+    private static float SigmoidScalar(float v)
+    {
+        if (v >= 0f) return 1f / (1f + MathF.Exp(-v));
+        float t = MathF.Exp(v);
+        return t / (1f + t);
+    }
+
+    // --- Transformer primitives (ticket S1-2) ---
+
+    /// <summary>Numerically-stable softmax along <paramref name="axis"/> (subtract the max before exp).</summary>
+    public Tensor Softmax(Tensor x, int axis)
+    {
+        int rank = x.Shape.Rank;
+        if (rank == 0) throw new ArgumentException("Softmax requires rank ≥ 1.");
+        int ax = axis < 0 ? axis + rank : axis;
+        if ((uint)ax >= (uint)rank) throw new ArgumentOutOfRangeException(nameof(axis));
+
+        var dims = x.Shape.Dimensions;
+        long outer = 1;
+        for (int i = 0; i < ax; i++) outer *= dims[i];
+        int axisLen = dims[ax];
+        long inner = 1;
+        for (int i = ax + 1; i < rank; i++) inner *= dims[i];
+
+        var src = Materialize(x);
+        var dst = new float[src.Length];
+        for (long o = 0; o < outer; o++)
+        {
+            long blockBase = o * axisLen * inner;
+            for (long c = 0; c < inner; c++)
+            {
+                long b = blockBase + c;
+                float max = float.NegativeInfinity;
+                for (int k = 0; k < axisLen; k++) { float v = src[b + (long)k * inner]; if (v > max) max = v; }
+                float sum = 0f;
+                for (int k = 0; k < axisLen; k++)
+                {
+                    float e = MathF.Exp(src[b + (long)k * inner] - max);
+                    dst[b + (long)k * inner] = e;
+                    sum += e;
+                }
+                float invSum = 1f / sum;
+                for (int k = 0; k < axisLen; k++) dst[b + (long)k * inner] *= invSum;
+            }
+        }
+        return new Tensor(x.Shape, x.DType, Device, handle: dst);
+    }
+
+    /// <summary>RMS normalization over the last axis: y = x / sqrt(mean(x²)+eps) * weight (weight is [D]).</summary>
+    public Tensor RmsNorm(Tensor x, Tensor weight, float eps)
+    {
+        int rank = x.Shape.Rank;
+        if (rank == 0) throw new ArgumentException("RmsNorm requires rank ≥ 1.");
+        int d = x.Shape[rank - 1];
+        if (weight.Shape.Rank != 1 || weight.Shape[0] != d)
+            throw new ArgumentException($"RmsNorm weight must be [{d}] to match the last axis of {x.Shape}.");
+
+        var src = Materialize(x);
+        var w = Materialize(weight);
+        var dst = new float[src.Length];
+        long rows = x.ElementCount / d;
+        for (long r = 0; r < rows; r++)
+        {
+            long b = r * d;
+            float sumSq = 0f;
+            for (int j = 0; j < d; j++) { float v = src[b + j]; sumSq += v * v; }
+            float inv = 1f / MathF.Sqrt(sumSq / d + eps);
+            for (int j = 0; j < d; j++) dst[b + j] = src[b + j] * inv * w[j];
+        }
+        return new Tensor(x.Shape, x.DType, Device, handle: dst);
+    }
+
+    /// <summary>SiLU / swish activation: y = x · sigmoid(x), elementwise.</summary>
+    public Tensor Silu(Tensor x)
+    {
+        var src = Materialize(x);
+        var dst = new float[src.Length];
+        for (int i = 0; i < src.Length; i++) dst[i] = src[i] * SigmoidScalar(src[i]);
+        return new Tensor(x.Shape, x.DType, Device, handle: dst);
+    }
+
+    /// <summary>
+    /// Rotary position embedding (rotate-half / Llama convention) on the last axis (head dim, even).
+    /// <paramref name="cos"/>/<paramref name="sin"/> are the duplicated tables, broadcastable to x's shape.
+    /// </summary>
+    public Tensor RotaryEmbedding(Tensor x, Tensor cos, Tensor sin)
+    {
+        int rank = x.Shape.Rank;
+        if (rank == 0) throw new ArgumentException("RotaryEmbedding requires rank ≥ 1.");
+        int d = x.Shape[rank - 1];
+        if (d % 2 != 0) throw new ArgumentException($"RoPE head dim must be even; got {d}.");
+        int half = d / 2;
+
+        var src = Materialize(x);
+        var c = Materialize(cos.BroadcastTo(x.Shape));
+        var s = Materialize(sin.BroadcastTo(x.Shape));
+        var dst = new float[src.Length];
+        long rows = x.ElementCount / d;
+        for (long r = 0; r < rows; r++)
+        {
+            long b = r * d;
+            for (int i = 0; i < d; i++)
+            {
+                float rotated = i < half ? -src[b + i + half] : src[b + i - half];
+                dst[b + i] = src[b + i] * c[b + i] + rotated * s[b + i];
+            }
+        }
+        return new Tensor(x.Shape, x.DType, Device, handle: dst);
+    }
+
+    // --- Indexing & loss (ticket S1-3) ---
+
+    public Tensor Gather(Tensor table, int[] ids)
+    {
+        int vocab = table.Shape[0], dim = table.Shape[1];
+        var src = Materialize(table);
+        var dst = new float[(long)ids.Length * dim];
+        for (int i = 0; i < ids.Length; i++)
+        {
+            int id = ids[i];
+            if ((uint)id >= (uint)vocab) throw new ArgumentOutOfRangeException(nameof(ids), id, $"id out of range [0,{vocab}).");
+            Array.Copy(src, (long)id * dim, dst, (long)i * dim, dim);
+        }
+        return new Tensor(new Shape(ids.Length, dim), table.DType, Device, handle: dst);
+    }
+
+    public Tensor ScatterAddRows(Tensor rows, int[] ids, int rowCount)
+    {
+        int dim = rows.Shape[rows.Shape.Rank - 1];
+        var src = Materialize(rows);
+        var dst = new float[(long)rowCount * dim]; // zero-initialized → unused rows get no gradient
+        for (int i = 0; i < ids.Length; i++)
+        {
+            int id = ids[i];
+            if ((uint)id >= (uint)rowCount) throw new ArgumentOutOfRangeException(nameof(ids), id, $"id out of range [0,{rowCount}).");
+            long rowBase = (long)id * dim, srcBase = (long)i * dim;
+            for (int j = 0; j < dim; j++) dst[rowBase + j] += src[srcBase + j];
+        }
+        return new Tensor(new Shape(rowCount, dim), rows.DType, Device, handle: dst);
+    }
+
+    public Tensor CrossEntropy(Tensor logits, int[] targets, int ignoreIndex)
+    {
+        int n = logits.Shape[0], vocab = logits.Shape[1];
+        var src = Materialize(logits);
+        double total = 0;
+        int count = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int t = targets[i];
+            if (t == ignoreIndex) continue;
+            if ((uint)t >= (uint)vocab) throw new ArgumentOutOfRangeException(nameof(targets), t, $"target out of range [0,{vocab}).");
+            long b = (long)i * vocab;
+            float max = float.NegativeInfinity;
+            for (int v = 0; v < vocab; v++) if (src[b + v] > max) max = src[b + v];
+            double sumExp = 0;
+            for (int v = 0; v < vocab; v++) sumExp += Math.Exp(src[b + v] - max);
+            total += (max + Math.Log(sumExp)) - src[b + t]; // logsumexp − logit[target] = −log softmax[target]
+            count++;
+        }
+        float loss = count > 0 ? (float)(total / count) : 0f;
+        return new Tensor(Shape.Scalar, logits.DType, Device, handle: new[] { loss });
+    }
+
+    public Tensor CrossEntropyGrad(Tensor logits, int[] targets, int ignoreIndex)
+    {
+        int n = logits.Shape[0], vocab = logits.Shape[1];
+        var src = Materialize(logits);
+        int count = 0;
+        for (int i = 0; i < n; i++) if (targets[i] != ignoreIndex) count++;
+        float invCount = count > 0 ? 1f / count : 0f;
+
+        var dst = new float[(long)n * vocab]; // ignored rows stay zero
+        for (int i = 0; i < n; i++)
+        {
+            int t = targets[i];
+            if (t == ignoreIndex) continue;
+            if ((uint)t >= (uint)vocab) throw new ArgumentOutOfRangeException(nameof(targets), t, $"target out of range [0,{vocab}).");
+            long b = (long)i * vocab;
+            float max = float.NegativeInfinity;
+            for (int v = 0; v < vocab; v++) max = MathF.Max(max, src[b + v]);
+            float sumExp = 0;
+            for (int v = 0; v < vocab; v++) sumExp += MathF.Exp(src[b + v] - max);
+            float invSum = 1f / sumExp;
+            for (int v = 0; v < vocab; v++) dst[b + v] = MathF.Exp(src[b + v] - max) * invSum * invCount; // softmax/count
+            dst[b + t] -= invCount; // − onehot/count
+        }
+        return new Tensor(new Shape(n, vocab), logits.DType, Device, handle: dst);
+    }
 
     public void Dispose() { }
 }

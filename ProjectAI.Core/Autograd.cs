@@ -45,18 +45,47 @@ public sealed class Autograd(IComputeBackend backend)
         ]);
     }
 
-    /// <summary>2-D matrix multiply, y = a · b. (Batched/attention autograd arrives in ticket S1-7.)</summary>
-    public Tensor MatMul(Tensor a, Tensor b)
+    /// <summary>
+    /// Batched matrix multiply over the trailing two axes, y = a · b (or a · bᵀ when <paramref name="transposeB"/>),
+    /// with NumPy batch-dim broadcasting. The transposeB form fuses the weight transpose for <c>Linear</c>
+    /// (weights stored [out, in]). The backward transposes the last two axes and folds broadcasted batch dims
+    /// back to each operand via <see cref="ReduceGradToShape"/> (this is what makes GQA's shared-KV gradient sum).
+    /// </summary>
+    public Tensor MatMul(Tensor a, Tensor b, bool transposeB = false)
     {
-        if (a.Shape.Rank != 2 || b.Shape.Rank != 2)
-            throw new NotImplementedException("Differentiable MatMul is 2-D for now (batched grad: ticket S1-7).");
+        if (a.Shape.Rank < 2 || b.Shape.Rank < 2)
+            throw new ArgumentException($"MatMul requires rank ≥ 2 operands; got {a.Shape} and {b.Shape}.");
 
-        var y = Backend.MatMul(a, b);
-        return Record(y, "matmul", [a, b], g =>
+        var y = Backend.MatMul(a, b, transposeB);
+        if (!transposeB)
+            return Record(y, "matmul", [a, b], g =>
+            [
+                ReduceGradToShape(Backend.MatMul(g, b, transposeB: true), a.Shape), // grad_a = g · bᵀ
+                ReduceGradToShape(Backend.MatMul(LastT(a), g), b.Shape),            // grad_b = aᵀ · g
+            ]);
+
+        // y = a · bᵀ, with b's trailing axes [n, k]: grad_a = g · b ; grad_b = gᵀ · a.
+        return Record(y, "matmul_tb", [a, b], g =>
         [
-            Backend.MatMul(g, b, transposeB: true),    // grad_a = g · bᵀ
-            Backend.MatMul(a.Transpose(0, 1), g),      // grad_b = aᵀ · g
+            ReduceGradToShape(Backend.MatMul(g, b), a.Shape),        // grad_a = g · b
+            ReduceGradToShape(Backend.MatMul(LastT(g), a), b.Shape), // grad_b = gᵀ · a
         ]);
+    }
+
+    /// <summary>Transposes the trailing two axes (the matrix axes), leaving batch axes in place.</summary>
+    private static Tensor LastT(Tensor t) => t.Transpose(t.Shape.Rank - 2, t.Shape.Rank - 1);
+
+    /// <summary>
+    /// Returns a dense, contiguous copy of <paramref name="x"/> (a no-op if it is already contiguous and
+    /// zero-offset). Needed before <see cref="Reshape"/> of a strided view (e.g. a transposed attention
+    /// output). The copy preserves logical order, so the backward is the identity.
+    /// </summary>
+    public Tensor Contiguous(Tensor x)
+    {
+        if (x is { IsContiguous: true, Offset: 0 }) return x;
+        var dst = Backend.Allocate(x.Shape, x.DType);
+        Backend.Copy(x, dst); // gathers the strided view into dense row-major order
+        return Record(dst, "contiguous", [x], g => [g]);
     }
 
     /// <summary>Mean over all elements, producing a scalar.</summary>
@@ -71,6 +100,89 @@ public sealed class Autograd(IComputeBackend backend)
             float scaled = ToScalar(g) / count;
             return [Backend.AddScalar(Backend.Allocate(x.Shape, x.DType), scaled)];
         });
+    }
+
+    // --- Indexing & loss (ticket S1-3) ---
+
+    /// <summary>Embedding lookup: gathers rows of <paramref name="weight"/> ([vocab, dim]) by id. Backward
+    /// scatter-adds the upstream gradient into the used rows (ids are constants, not differentiated).</summary>
+    public Tensor Embedding(Tensor weight, int[] ids)
+    {
+        var y = Backend.Gather(weight, ids);
+        int vocab = weight.Shape[0];
+        return Record(y, "embedding", [weight], g => [Backend.ScatterAddRows(g, ids, vocab)]);
+    }
+
+    /// <summary>Mean cross-entropy of <paramref name="logits"/> ([N, vocab]) vs integer targets. Backward is
+    /// (softmax − onehot)/validCount scaled by the upstream scalar gradient.</summary>
+    public Tensor CrossEntropy(Tensor logits, int[] targets, int ignoreIndex)
+    {
+        var loss = Backend.CrossEntropy(logits, targets, ignoreIndex);
+        return Record(loss, "cross_entropy", [logits], g =>
+            [Backend.MulScalar(Backend.CrossEntropyGrad(logits, targets, ignoreIndex), ToScalar(g))]);
+    }
+
+    // --- Differentiable transformer primitives (forward via fused backend kernels, closed-form backward) ---
+
+    /// <summary>Softmax along <paramref name="axis"/>. Backward: grad_x = y ⊙ (g - Σ_axis(g⊙y)).</summary>
+    public Tensor Softmax(Tensor x, int axis)
+    {
+        var y = Backend.Softmax(x, axis);
+        return Record(y, "softmax", [x], g =>
+        {
+            var dot = Backend.Sum(Backend.Mul(g, y), axis, keepDims: true);
+            return [Backend.Mul(y, Backend.Sub(g, dot))];
+        });
+    }
+
+    /// <summary>SiLU activation x·σ(x). Backward: grad_x = g ⊙ (s + y - s⊙y), s = σ(x).</summary>
+    public Tensor Silu(Tensor x)
+    {
+        var y = Backend.Silu(x);
+        return Record(y, "silu", [x], g =>
+        {
+            var s = Backend.Sigmoid(x);
+            var derivative = Backend.Sub(Backend.Add(s, y), Backend.Mul(s, y));
+            return [Backend.Mul(g, derivative)];
+        });
+    }
+
+    /// <summary>
+    /// RMSNorm over the last axis with learned per-feature scale. Backward (per the verified VJP):
+    /// grad_x = inv·(g⊙w) - (inv²/D)·x·Σ(g⊙y); grad_w = Σ_leading(g⊙(x·inv)), inv = 1/sqrt(mean(x²)+eps).
+    /// </summary>
+    public Tensor RmsNorm(Tensor x, Tensor weight, float eps)
+    {
+        int lastAxis = x.Shape.Rank - 1;
+        int d = x.Shape[lastAxis];
+        var y = Backend.RmsNorm(x, weight, eps);
+        return Record(y, "rmsnorm", [x, weight], g =>
+        {
+            var meanSq = Backend.Mean(Backend.Mul(x, x), lastAxis, keepDims: true);
+            var denom = Backend.Sqrt(Backend.AddScalar(meanSq, eps));
+            var ones = Backend.AddScalar(Backend.Allocate(denom.Shape, x.DType), 1f);
+            var inv = Backend.Div(ones, denom);                                 // [.., 1]
+            var dot = Backend.Sum(Backend.Mul(g, y), lastAxis, keepDims: true); // [.., 1]
+
+            var direct = Backend.Mul(Backend.Mul(g, weight), inv);              // inv·(g⊙w)
+            var coef = Backend.MulScalar(Backend.Mul(inv, inv), 1f / d);        // inv²/D
+            var center = Backend.Mul(Backend.Mul(coef, x), dot);               // (inv²/D)·x·dot
+            var gradX = Backend.Sub(direct, center);
+
+            var gradW = ReduceGradToShape(Backend.Mul(g, Backend.Mul(x, inv)), weight.Shape);
+            return [gradX, gradW];
+        });
+    }
+
+    /// <summary>
+    /// Rotary position embedding (rotate-half). cos/sin are constants. Since the forward is an
+    /// orthogonal rotation, the backward is the same op with sin negated (the inverse rotation).
+    /// </summary>
+    public Tensor RotaryEmbedding(Tensor x, Tensor cos, Tensor sin)
+    {
+        var negSin = Backend.MulScalar(sin, -1f);
+        var y = Backend.RotaryEmbedding(x, cos, sin);
+        return Record(y, "rope", [x], g => [Backend.RotaryEmbedding(g, cos, negSin)]);
     }
 
     // --- Differentiable view ops (raw Tensor views are detached; route through here to keep gradients) ---
@@ -96,7 +208,18 @@ public sealed class Autograd(IComputeBackend backend)
     {
         var original = x.Shape.Dimensions.ToArray();
         var y = x.Reshape(newDimensions);
-        return Record(y, "reshape", [x], g => [g.Reshape(original)]);
+        return Record(y, "reshape", [x], g =>
+        {
+            // The upstream grad may be a non-contiguous view (e.g. from a Transpose backward feeding a
+            // reshape, as in attention's head merge); densify it before the metadata-only reshape.
+            if (g is not { IsContiguous: true, Offset: 0 })
+            {
+                var dense = Backend.Allocate(g.Shape, g.DType);
+                Backend.Copy(g, dense);
+                g = dense;
+            }
+            return [g.Reshape(original)];
+        });
     }
 
     /// <summary>Slices along an axis; gradient scatters back into a zero tensor of the input's shape.</summary>

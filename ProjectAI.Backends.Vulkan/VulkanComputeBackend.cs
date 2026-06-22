@@ -24,6 +24,7 @@ public sealed class VulkanComputeBackend(Device device) : IComputeBackend
     public Tensor AddScalar(Tensor a, float scalar) => throw new NotImplementedException("Stage 2.");
     public Tensor MulScalar(Tensor a, float scalar) => throw new NotImplementedException("Stage 2.");
     public Tensor Sqrt(Tensor x) => throw new NotImplementedException("Stage 2.");
+    public Tensor Sigmoid(Tensor x) => throw new NotImplementedException("Stage 2.");
     public Tensor MatMul(Tensor a, Tensor b, bool transposeB = false) => throw new NotImplementedException("Stage 2 — ticket S2-5.");
     public Tensor Sum(Tensor x, int axis, bool keepDims = false) => throw new NotImplementedException("Stage 2 — ticket S2-5.");
     public Tensor Mean(Tensor x, int axis, bool keepDims = false) => throw new NotImplementedException("Stage 2 — ticket S2-5.");
@@ -32,5 +33,9 @@ public sealed class VulkanComputeBackend(Device device) : IComputeBackend
     public Tensor RmsNorm(Tensor x, Tensor weight, float eps) => throw new NotImplementedException("Stage 2.");
     public Tensor Silu(Tensor x) => throw new NotImplementedException("Stage 2.");
     public Tensor RotaryEmbedding(Tensor x, Tensor cos, Tensor sin) => throw new NotImplementedException("Stage 2.");
+    public Tensor Gather(Tensor table, int[] ids) => throw new NotImplementedException("Stage 2.");
+    public Tensor ScatterAddRows(Tensor rows, int[] ids, int rowCount) => throw new NotImplementedException("Stage 2.");
+    public Tensor CrossEntropy(Tensor logits, int[] targets, int ignoreIndex) => throw new NotImplementedException("Stage 2.");
+    public Tensor CrossEntropyGrad(Tensor logits, int[] targets, int ignoreIndex) => throw new NotImplementedException("Stage 2.");
     public void Dispose() { }
 }
