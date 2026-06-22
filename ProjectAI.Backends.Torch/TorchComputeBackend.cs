@@ -18,8 +18,11 @@ public sealed class TorchComputeBackend(Device device) : IComputeBackend
     public void Copy(Tensor source, Tensor destination) => throw new NotImplementedException("Stage 2.");
     public Tensor Add(Tensor a, Tensor b) => throw new NotImplementedException("Stage 2.");
     public Tensor Mul(Tensor a, Tensor b) => throw new NotImplementedException("Stage 2.");
+    public Tensor Sub(Tensor a, Tensor b) => throw new NotImplementedException("Stage 2.");
+    public Tensor Div(Tensor a, Tensor b) => throw new NotImplementedException("Stage 2.");
     public Tensor AddScalar(Tensor a, float scalar) => throw new NotImplementedException("Stage 2.");
     public Tensor MulScalar(Tensor a, float scalar) => throw new NotImplementedException("Stage 2.");
+    public Tensor Sqrt(Tensor x) => throw new NotImplementedException("Stage 2.");
     public Tensor MatMul(Tensor a, Tensor b, bool transposeB = false) => throw new NotImplementedException("Stage 2 — ticket S2-2.");
     public Tensor Sum(Tensor x, int axis, bool keepDims = false) => throw new NotImplementedException("Stage 2 — ticket S2-2.");
     public Tensor Mean(Tensor x, int axis, bool keepDims = false) => throw new NotImplementedException("Stage 2 — ticket S2-2.");

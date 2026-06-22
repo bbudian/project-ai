@@ -81,10 +81,14 @@ public sealed class CpuComputeBackend : IComputeBackend
     }
 
     // --- Elementwise (NumPy-style broadcasting; strided inputs are gathered) ---
-    public Tensor Add(Tensor a, Tensor b) => Elementwise(a, b, static (x, y) => x + y, isAdd: true);
-    public Tensor Mul(Tensor a, Tensor b) => Elementwise(a, b, static (x, y) => x * y, isAdd: false);
+    private enum BinOp { Add, Mul, Sub, Div }
 
-    private Tensor Elementwise(Tensor a, Tensor b, Func<float, float, float> op, bool isAdd)
+    public Tensor Add(Tensor a, Tensor b) => Elementwise(a, b, BinOp.Add);
+    public Tensor Mul(Tensor a, Tensor b) => Elementwise(a, b, BinOp.Mul);
+    public Tensor Sub(Tensor a, Tensor b) => Elementwise(a, b, BinOp.Sub);
+    public Tensor Div(Tensor a, Tensor b) => Elementwise(a, b, BinOp.Div);
+
+    private Tensor Elementwise(Tensor a, Tensor b, BinOp kind)
     {
         var shape = a.Shape.BroadcastWith(b.Shape);
         var dst = Allocate(shape, a.DType);
@@ -97,8 +101,13 @@ public sealed class CpuComputeBackend : IComputeBackend
             a is { IsContiguous: true, Offset: 0 } && b is { IsContiguous: true, Offset: 0 } &&
             Buffer(a).Length == shape.ElementCount && Buffer(b).Length == shape.ElementCount)
         {
-            if (isAdd) TensorPrimitives.Add(Buffer(a), Buffer(b), outBuf);
-            else TensorPrimitives.Multiply(Buffer(a), Buffer(b), outBuf);
+            switch (kind)
+            {
+                case BinOp.Add: TensorPrimitives.Add(Buffer(a), Buffer(b), outBuf); break;
+                case BinOp.Mul: TensorPrimitives.Multiply(Buffer(a), Buffer(b), outBuf); break;
+                case BinOp.Sub: TensorPrimitives.Subtract(Buffer(a), Buffer(b), outBuf); break;
+                case BinOp.Div: TensorPrimitives.Divide(Buffer(a), Buffer(b), outBuf); break;
+            }
             return dst;
         }
 
@@ -111,7 +120,17 @@ public sealed class CpuComputeBackend : IComputeBackend
         using var ea = av.EnumerateOffsets().GetEnumerator();
         using var eb = bv.EnumerateOffsets().GetEnumerator();
         while (ea.MoveNext() && eb.MoveNext())
-            outBuf[i++] = op(bufA[(int)ea.Current], bufB[(int)eb.Current]);
+        {
+            float x = bufA[(int)ea.Current], y = bufB[(int)eb.Current];
+            outBuf[i++] = kind switch
+            {
+                BinOp.Add => x + y,
+                BinOp.Mul => x * y,
+                BinOp.Sub => x - y,
+                BinOp.Div => x / y,
+                _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+            };
+        }
         return dst;
     }
 
@@ -126,6 +145,13 @@ public sealed class CpuComputeBackend : IComputeBackend
     {
         var dst = Allocate(a.Shape, a.DType);
         TensorPrimitives.Multiply(Materialize(a), scalar, Buffer(dst));
+        return dst;
+    }
+
+    public Tensor Sqrt(Tensor x)
+    {
+        var dst = Allocate(x.Shape, x.DType);
+        TensorPrimitives.Sqrt(Materialize(x), Buffer(dst));
         return dst;
     }
 

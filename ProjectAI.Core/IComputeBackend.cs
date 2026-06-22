@@ -17,11 +17,15 @@ public interface IComputeBackend : IDisposable
     void ToHost(Tensor source, Span<float> destination);
     void Copy(Tensor source, Tensor destination);
 
-    // --- Elementwise ---
+    // --- Elementwise (NumPy-style broadcasting) ---
     Tensor Add(Tensor a, Tensor b);
     Tensor Mul(Tensor a, Tensor b);
+    Tensor Sub(Tensor a, Tensor b);
+    Tensor Div(Tensor a, Tensor b);
     Tensor AddScalar(Tensor a, float scalar);
     Tensor MulScalar(Tensor a, float scalar);
+    /// <summary>Elementwise square root.</summary>
+    Tensor Sqrt(Tensor x);
 
     // --- Linear algebra ---
     /// <summary>Batched matrix multiply. <paramref name="transposeB"/> fuses the common weight transpose.</summary>

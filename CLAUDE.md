@@ -90,12 +90,14 @@ dotnet run --project ProjectAI -- help
 ```
 
 ## Status
-Stage 0 in progress. Done: the scaffold, **S0-1** (the `Tensor`/`Shape` value types — row-major
-strides, NumPy-style broadcasting, zero-copy views (`Reshape`/`Transpose`/`Permute`/`Slice`) and a
-stride-aware `ToHost`), and **S0-2/S0-3** (the `IComputeBackend` op set incl. axis reductions, plus
-the CPU oracle's batched GEMM, `Sum`/`Mean`/`Max`, and broadcasting/non-contiguous elementwise —
-validated against an independent double-precision reference). Remaining ops are stubs whose
-`NotImplementedException` messages cite their ticket IDs. The solution builds clean and `dotnet test`
-is green (63 passing, 1 skipped — the S0-4 placeholder).
-Next: **S0-4** (reverse-mode autograd), then **S0-5** (AdamW), gated by the **S0-6** gradient-check
-harness. See `docs/BUILD_PLAN.md`.
+**Stage 0 is complete (S0-1 … S0-6).** The CPU oracle implements elementwise ops (incl. `Sub`/`Div`/
+`Sqrt`, with broadcasting and non-contiguous/strided support), batched `MatMul`, and axis `Sum`/`Mean`/
+`Max`, all validated against an independent double-precision reference. The `Autograd` facade +
+`Tensor.Backward` give reverse-mode autodiff — topo-order gradient accumulation, broadcast-aware grad
+reduction, differentiable view ops, and a `no_grad` scope. `AdamW` does bias-corrected updates with
+decoupled weight decay and a per-parameter timestep. Finite-difference gradient checks cover every
+differentiable op. The remaining backend stubs are the transformer primitives (`Softmax`/`RmsNorm`/
+`Silu`/`RotaryEmbedding`, ticket S1-2). `dotnet run --project ProjectAI -- demo` trains `y = Wx + b` to
+~0 loss and recovers the true parameters; `dotnet test` is green (84 passing, 0 skipped); clean build.
+Next: **Stage 1** — the first working LLM (BPE tokenizer → transformer modules → train/generate). See
+`docs/BUILD_PLAN.md`.

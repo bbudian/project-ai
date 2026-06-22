@@ -67,6 +67,9 @@ public sealed class Tensor
     }
 
     // --- View operations (metadata only; share Handle) ---
+    // These are NON-differentiable primitives: the returned view is detached (RequiresGrad = false).
+    // For a view inside an autograd graph, use the matching op on the Autograd facade, which records a
+    // GradNode. This keeps "the tape is built in one place" (the facade) and avoids dangling views.
 
     /// <summary>Returns a view with a new shape. Requires a contiguous tensor (the common case).</summary>
     public Tensor Reshape(params int[] newDimensions)
@@ -79,7 +82,7 @@ public sealed class Tensor
             throw new ArgumentException(
                 $"Cannot reshape {Shape} ({Shape.ElementCount} elements) to {newShape} ({newShape.ElementCount} elements).");
 
-        return new Tensor(newShape, newShape.ContiguousStrides(), Offset, DType, Device, Handle, RequiresGrad);
+        return new Tensor(newShape, newShape.ContiguousStrides(), Offset, DType, Device, Handle, requiresGrad: false);
     }
 
     /// <summary>Returns a view with two axes swapped (produces a non-contiguous view in general).</summary>
@@ -93,7 +96,7 @@ public sealed class Tensor
         var strides = (long[])Strides.Clone();
         (dims[axis0], dims[axis1]) = (dims[axis1], dims[axis0]);
         (strides[axis0], strides[axis1]) = (strides[axis1], strides[axis0]);
-        return new Tensor(new Shape(dims), strides, Offset, DType, Device, Handle, RequiresGrad);
+        return new Tensor(new Shape(dims), strides, Offset, DType, Device, Handle, requiresGrad: false);
     }
 
     /// <summary>Returns a view whose axes are reordered by <paramref name="permutation"/>.</summary>
@@ -116,7 +119,7 @@ public sealed class Tensor
             newDims[i] = srcDims[p];
             newStrides[i] = Strides[p];
         }
-        return new Tensor(new Shape(newDims), newStrides, Offset, DType, Device, Handle, RequiresGrad);
+        return new Tensor(new Shape(newDims), newStrides, Offset, DType, Device, Handle, requiresGrad: false);
     }
 
     /// <summary>Returns a view of <paramref name="length"/> elements along <paramref name="axis"/> starting at <paramref name="start"/>.</summary>
@@ -131,7 +134,7 @@ public sealed class Tensor
         var dims = Shape.Dimensions.ToArray();
         dims[axis] = length;
         long newOffset = Offset + (long)start * Strides[axis];
-        return new Tensor(new Shape(dims), (long[])Strides.Clone(), newOffset, DType, Device, Handle, RequiresGrad);
+        return new Tensor(new Shape(dims), (long[])Strides.Clone(), newOffset, DType, Device, Handle, requiresGrad: false);
     }
 
     /// <summary>
@@ -160,7 +163,7 @@ public sealed class Tensor
             else if (s == 1) newStrides[i] = 0;         // size-1 axis: repeat
             else throw new ArgumentException($"Cannot broadcast {Shape} to {target}: axis {i} ({s} vs {tgt[i]}).");
         }
-        return new Tensor(target, newStrides, Offset, DType, Device, Handle, RequiresGrad);
+        return new Tensor(target, newStrides, Offset, DType, Device, Handle, requiresGrad: false);
     }
 
     /// <summary>
@@ -200,8 +203,62 @@ public sealed class Tensor
     /// <summary>The op that produced this tensor, used to walk the backward graph. Null for leaf tensors.</summary>
     public GradNode? GradFn { get; internal set; }
 
-    /// <summary>Seeds and runs the backward pass from this (scalar) tensor. Implemented in Stage 0.</summary>
-    public void Backward() => throw new NotImplementedException("Autograd backward pass — ticket S0-4.");
+    /// <summary>The backend that produced this tensor; drives the backward pass. Set by the autograd facade.</summary>
+    internal IComputeBackend? Backend { get; set; }
+
+    /// <summary>
+    /// Seeds this tensor's gradient with ones and runs reverse-mode autodiff over the recorded graph,
+    /// accumulating <see cref="Grad"/> on every tensor that requires grad. Call on a scalar loss.
+    /// </summary>
+    public void Backward()
+    {
+        var backend = Backend
+            ?? throw new InvalidOperationException(
+                "Backward requires a tensor produced by the Autograd facade (no graph/backend recorded).");
+        if (Shape.ElementCount != 1)
+            throw new InvalidOperationException(
+                $"Backward expects a scalar loss; this tensor has shape {Shape}. Reduce to a scalar first.");
+
+        // Topological order: every input appears before the op that consumes it.
+        var topo = new List<Tensor>();
+        var visited = new HashSet<Tensor>();
+        BuildTopo(this, visited, topo);
+
+        // Clear gradients on intermediate (non-leaf) nodes so a second Backward over the same graph
+        // doesn't accumulate onto stale values. Leaf grads are left alone (their accumulation across
+        // graphs is intentional and managed by the optimizer's ZeroGrad).
+        foreach (var node in topo)
+            if (node.GradFn is not null)
+                node.Grad = null;
+
+        // Seed d(self)/d(self) = 1 (for a scalar loss this is the usual 1.0).
+        Grad = backend.AddScalar(backend.Allocate(Shape, DType), 1f);
+
+        for (int i = topo.Count - 1; i >= 0; i--)
+        {
+            var node = topo[i];
+            if (node.GradFn is null || node.Grad is null) continue;
+
+            var inputs = node.GradFn.Inputs;
+            var grads = node.GradFn.Backward(node.Grad);
+            for (int j = 0; j < inputs.Count; j++)
+            {
+                var input = inputs[j];
+                if (!input.RequiresGrad) continue;
+                // Accumulate so a tensor used by multiple ops (fan-out) sums its gradients.
+                input.Grad = input.Grad is null ? grads[j] : backend.Add(input.Grad, grads[j]);
+            }
+        }
+    }
+
+    private static void BuildTopo(Tensor t, HashSet<Tensor> visited, List<Tensor> topo)
+    {
+        if (!visited.Add(t)) return;
+        if (t.GradFn is not null)
+            foreach (var input in t.GradFn.Inputs)
+                BuildTopo(input, visited, topo);
+        topo.Add(t);
+    }
 
     public override string ToString() =>
         $"Tensor(shape={Shape}, dtype={DType}, device={Device}, contiguous={IsContiguous}, requiresGrad={RequiresGrad})";
