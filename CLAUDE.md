@@ -45,7 +45,7 @@ One concern per project. Every arrow in the table is a *compile-time* `ProjectRe
 | `ProjectAI.Models` | Llama-style transformer (RoPE/GQA/RMSNorm/SwiGLU), KV cache, samplers | Core |
 | `ProjectAI.Training` | Training loop, datasets, checkpointing | Core, Models, Formats, Tokenizers |
 | `ProjectAI` (CLI) | Composition root: picks a backend, wires `generate`/`train`/`convert` | all of the above |
-| `ProjectAI.Tests` | xUnit v3: contracts, gradient checks, backend conformance | Core, Backends.Cpu, Models |
+| `ProjectAI.Tests` | xUnit v3: contract tests (live); gradient-check (S0-6) and backend-conformance (S2-1) suites land with those stages | Core, Backends.Cpu, Models |
 
 ## SOLID, concretely
 - **S — Single responsibility:** one concern per project and per class. A file that mixes
@@ -53,8 +53,10 @@ One concern per project. Every arrow in the table is a *compile-time* `ProjectRe
 - **O / D — Open-closed & dependency inversion:** code against `IComputeBackend`, `ITokenizer`,
   `IWeightLoader`, `IOptimizer`, `ISampler` — never a concrete type. Add a backend or a loader
   without editing a single call site.
-- **L — Liskov:** every `IComputeBackend` must be substitutable, enforced by the **conformance suite**
-  (each backend must match `Backends.Cpu` within tolerance). A backend that can't pass isn't done.
+- **L — Liskov:** every `IComputeBackend` must be substitutable. The **conformance suite** (each
+  backend must match `Backends.Cpu` within tolerance) is the planned enforcement mechanism — it lands
+  in Stage 2 (ticket S2-1); a backend that can't pass it isn't done. Today the only enforcement is that
+  every backend implements the interface so the solution compiles.
 - **I — Interface segregation:** keep `IComputeBackend` cohesive. If a method only one backend needs
   starts creeping in, split the interface instead of widening it.
 
@@ -83,7 +85,7 @@ One concern per project. Every arrow in the table is a *compile-time* `ProjectRe
 ## Build & test
 ```
 dotnet build
-dotnet test                         # contract + gradient-check + conformance tests
+dotnet test                         # contracts now; gradient-check (S0-6) + conformance (S2-1) later
 dotnet run --project ProjectAI -- help
 ```
 
@@ -92,5 +94,6 @@ Stage 0 in progress. Done: the scaffold + **S0-1** — the `Tensor`/`Shape` valu
 row-major strides, NumPy-style broadcasting, and zero-copy views (`Reshape`/`Transpose`/`Permute`/
 `Slice`) over shared storage, with a stride-aware `ToHost` that materializes any view. CPU elementwise
 ops are real; remaining ops are stubs whose `NotImplementedException` messages cite their ticket IDs.
+The solution builds clean and `dotnet test` is green (18 passing, 1 skipped — the S0-4 placeholder).
 Next: **S0-3** (CPU GEMM + reductions) and **S0-4** (reverse-mode autograd), gated by the **S0-6**
 gradient-check harness. See `docs/BUILD_PLAN.md`.

@@ -95,23 +95,28 @@ centralizes `net10.0`, nullable, implicit usings, and doc-gen (DRY).
 | **ProjectAI.Formats** | `safetensors` + `GGUF` loaders; `StateDict` | Core | 1 |
 | **ProjectAI.Models** | Llama-style transformer (RoPE, GQA, RMSNorm, SwiGLU), KV cache, samplers, `ModelConfig` | Core | 1 |
 | **ProjectAI.Training** | Training loop, datasets, AdamW driver, checkpointing | Core, Models, Formats, Tokenizers | 1 |
-| **ProjectAI** (CLI) | Composition root / host: `generate`, `train`, `convert` | all of the above | 1 |
+| **ProjectAI** (CLI) | Composition root / host: `generate`, `train`, `convert` | all of the above (GPU backends wired in Stage 2) | 1 |
 | **ProjectAI.Tests** | xUnit v3: contract tests, gradient checks, backend conformance | Core, Backends.Cpu, Models | all |
 
 ---
 
 ## 4. Dependencies & package policy
 
-All versions below were confirmed current as of June 2026.
+The CPU/test packages below are confirmed by a successful `dotnet restore`/`build` on the .NET 10 SDK
+(10.0.301). The Stage-2 GPU packages (TorchSharp, Silk.NET) are **not** yet referenced by any `.csproj`;
+their versions are aspirational and must be re-confirmed against NuGet before Stage 2.
 
 | Package | Version | Used by | Purpose |
 |---|---|---|---|
 | `System.Numerics.Tensors` | **10.0.9** | Backends.Cpu | `TensorPrimitives`, SIMD span ops |
 | `TorchSharp` | **0.107.0** | Backends.Torch (Stage 2) | libtorch bindings |
-| `TorchSharp-cuda-windows` | **0.106.0** | Backends.Torch (Win) | bundles libtorch 2.10.0 / CUDA 12.8 |
+| `TorchSharp-cuda-windows` | **0.107.0** | Backends.Torch (Win) | bundles libtorch 2.10.0 / CUDA 12.8; **must match `TorchSharp`** (released in lockstep) |
 | `libtorch-cpu` | **2.10.0.x** | Backends.Torch (mac/CPU) | CPU/MPS libtorch |
 | `Silk.NET.Vulkan` | **2.23.0** | Backends.Vulkan (Stage 2) | Vulkan 1.4.336 bindings; bundles MoltenVK 1.4.1 |
-| `xunit.v3` + `Microsoft.NET.Test.Sdk` | **3.2.2** / 17.12 | Tests | test framework |
+| `Silk.NET.Vulkan.Extensions.KHR` | **2.23.0** | Backends.Vulkan (Stage 2) | KHR swapchain / extension entry points |
+| `xunit.v3` | **3.2.2** | Tests | test framework |
+| `Microsoft.NET.Test.Sdk` | **17.12.0** | Tests | test host / runner integration |
+| `xunit.runner.visualstudio` | **3.1.0** | Tests | VS / `dotnet test` test adapter |
 
 **Policy:** a dependency is allowed if it provides math primitives, SIMD, IO, or device bindings.
 A dependency is **disallowed** if it would implement model definitions, autograd, optimization, or
@@ -156,8 +161,12 @@ against `TensorPrimitives`.
   reductions, the transformer primitives). Implement allocation/transfer/copy on CPU (done) and
   decide the storage contract (`float[]` handle for now; revisit for dtype generality in S3).
 - **Acceptance:** `FromHost`/`ToHost`/`Copy` round-trip; allocating and disposing 10k tensors leaks
-  nothing; interface compiles against all three backend stubs (already enforced by the conformance
-  scaffold).
+  nothing; interface compiles against all three backend stubs. (The full cross-backend conformance
+  suite that asserts numerical equality is built in Stage 2, ticket **S2-1**; until then "enforcement"
+  is only that every backend implements the interface so the solution compiles.)
+- **Known gap:** the seam does **not** yet declare the reduction ops (`Sum`/`Mean`/`Max` along an axis)
+  that **S0-3** implements and **S0-4** needs for broadcast/fan-out backward — add them to
+  `IComputeBackend` as part of this ticket.
 - **Depends on:** S0-1
 
 ### S0-3 — CPU reference kernels
@@ -173,7 +182,10 @@ against `TensorPrimitives`.
 - **Files:** `Core/GradNode.cs`, `Core/Tensor.cs` (`Backward`), `Core/Autograd.cs` (new: tape + ops)
 - **Do:** wrap forward ops so each records a `GradNode` (op name, inputs, local backward closure);
   implement `Tensor.Backward()` with topological ordering and gradient accumulation for fan-out;
-  support `requires_grad` propagation and `no_grad` scopes.
+  support `requires_grad` propagation and `no_grad` scopes. **`IComputeBackend` ops stay
+  non-differentiable**: the differentiable layer lives one level above, in `Core/Autograd.cs`, which
+  calls a backend op and then attaches a `GradNode`. `Module.Forward` builds the graph through this
+  Core autograd facade — never by calling the backend directly.
 - **Acceptance:** **finite-difference gradient check** (S0-6) passes for add, mul, matmul, sum, and a
   small composite expression; double-use of a tensor accumulates (does not overwrite) gradients;
   backward over a 3-op chain matches hand-derived gradients.
@@ -191,10 +203,44 @@ against `TensorPrimitives`.
 - **Files:** `Tests/GradientCheckTests.cs`, `Tests/CoreContractsTests.cs` (exists)
 - **Do:** central finite-difference utility (perturb ±ε, compare numeric vs analytic grad within
   tolerance); property tests for shapes/broadcasting; enable the currently-skipped
-  `Autograd_NumericGradientCheck` test.
+  `Autograd_NumericGradientCheck` test; backfill the S0-1 `Shape` equality/`GetHashCode` tests
+  (currently only exercised incidentally) and a multi-dim incompatible-broadcast case.
 - **Acceptance:** every differentiable core op has a passing gradient-check test; CI runs `dotnet test`
   green; coverage of Core ≥ 80%.
-- **Depends on:** S0-4 (consumes S0-3/S0-5)
+- **Depends on:** S0-3, S0-4, S0-5 (grad-checks matmul/reductions from S0-3 and the AdamW convex check from S0-5)
+
+### S0-7 — Determinism, RNG & tolerance infrastructure  *(new)*
+- **Files:** `Core/Random.cs` (new: seedable PRNG), `Core/Tolerances.cs` (new)
+- **Do:** a centralized, host-side, seedable PRNG used by every stochastic path (parameter init,
+  sampling, and dropout later); a single global seed policy; and a `Tolerances` home for the numeric
+  comparison constants the tests share, replacing scattered `1e-5`/`1e-4` literals. Satisfies the
+  cross-cutting "fixed seeds / centralized tolerances" discipline (§11) that currently has no ticket.
+- **Acceptance:** the same seed reproduces an identical random stream across runs and processes;
+  `Tolerances` is the only place comparison epsilons are defined; a fixed-seed op test is bit-reproducible.
+- **Depends on:** S0-2
+
+### S0-8 — Parameter initialization  *(new)*
+- **Files:** `Core/Init.cs` (new), `Core/Module.cs` (init hooks)
+- **Do:** initialization strategies (zeros, normal, Xavier/Glorot, Kaiming) that fill registered
+  parameters through the active backend, driven by the S0-7 RNG so init is reproducible; model
+  construction selects an init per parameter. Without this, S1-10's from-scratch training milestone
+  cannot start.
+- **Acceptance:** each strategy reproduces the expected mean/variance to tolerance on large samples;
+  a fixed seed reproduces identical initial weights; a freshly-initialized `LlamaModel`'s parameters
+  are finite and non-degenerate.
+- **Depends on:** S0-7
+
+### S0-9 — Module forward contract  *(new)*
+- **Files:** `Core/Module.cs`, `Core/ForwardContext.cs` (new), `Models/KvCache.cs`
+- **Do:** decide and lock how non-trivial forward inputs flow through `Module` before any model layer
+  is written. Introduce a `ForwardContext` (causal mask, position ids, optional `KvCache`, training
+  flag) and/or richer per-module signatures so `Attention`/`TransformerBlock`/`LlamaModel` can thread
+  mask/positions/cache without redesigning `Core` mid-Stage-1. Define `KvCache`'s read/write API here
+  (it is currently a property bag with no methods).
+- **Acceptance:** `Module.Forward` (or its agreed replacement) threads a mask, positions, and a
+  `KvCache` end-to-end on a 2-layer toy; the single-tensor convenience path still works for simple
+  modules; no module needs to reach around the contract.
+- **Depends on:** S0-1
 
 **Stage 0 milestone:** `dotnet test` green; a 20-line script trains `y = Wx + b` on synthetic data to
 near-zero loss using only our `Tensor` + autograd + AdamW on the CPU backend.
@@ -257,7 +303,7 @@ all exist as compiling stubs with matching ticket IDs.
   onto the S1-2 ops and registered parameters.
 - **Acceptance:** each module's output matches a reference layer; parameters appear in
   `Module.Parameters()`; gradient-checked end-to-end.
-- **Depends on:** S1-2, S0-4
+- **Depends on:** S1-2, S0-4, S0-9 (forward contract)
 
 ### S1-7 — Grouped-query attention + KV cache
 - **Files:** `Models/Modules.cs` (`Attention`), `Models/KvCache.cs` (split out)
@@ -283,7 +329,7 @@ all exist as compiling stubs with matching ticket IDs.
 - **Do:** greedy/argmax; temperature; top-k; top-p (nucleus); seedable RNG for reproducibility.
 - **Acceptance:** greedy is deterministic; temperature→0 approaches greedy; top-k/top-p restrict the
   support set correctly (unit tests on crafted logits); fixed seed reproduces a sequence.
-- **Depends on:** S1-8
+- **Depends on:** S1-8, S0-7 (seedable RNG)
 
 ### S1-10 — Training loop
 - **Files:** `Training/Training.cs` (`Trainer`), `Training/Datasets.cs` (new)
@@ -293,7 +339,7 @@ all exist as compiling stubs with matching ticket IDs.
 - **Acceptance:** training loss on a small real corpus (e.g. TinyStories subset) decreases
   monotonically over an epoch; checkpoint reload reproduces identical logits; grad-accum of N steps
   equals one N×-batch step within tolerance.
-- **Depends on:** S0-5, S1-8
+- **Depends on:** S0-5, S1-8, S0-8 (parameter init)
 
 ### S1-11 — CLI end-to-end  *(milestone / verification)*
 - **Files:** `ProjectAI/Program.cs`
@@ -376,21 +422,21 @@ Exit: both modules produce end-to-end outputs on the shared backend.
 
 ## 12. Immediate next actions
 
-1. **Build & test the scaffold locally** (the sandbox here has no NuGet/SDK access, so this hasn't
-   been compiler-verified — see note below):
+1. **Build & test the scaffold locally** (verified building clean on the .NET 10 SDK — see note below):
    ```
    dotnet restore
-   dotnet build
-   dotnet test          # 3 passing contract tests, 1 skipped (S0-4 placeholder)
+   dotnet build         # 0 warnings, 0 errors across all 10 projects
+   dotnet test          # 18 passing, 1 skipped (S0-4 placeholder)
    dotnet run --project ProjectAI -- help
    ```
-2. **Start S0-1 → S0-6 in order.** Stage 0 is the critical path; nothing model-related is trustworthy
-   until gradient checks pass.
+2. **Continue Stage 0 in order** — S0-1 is done; next is S0-2 → S0-6 plus the new foundation tickets
+   **S0-7/S0-8/S0-9**. Stage 0 is the critical path; nothing model-related is trustworthy until
+   gradient checks pass.
 3. **Parallelize S1-1 (BPE).** It has no dependency on Stage 0 and can be built alongside it.
 4. **Stand up CI early** (`dotnet build` + `dotnet test`) so the gradient-check suite guards every commit.
 
-> **Verification note.** This scaffold was checked statically — all 10 `.csproj` files and the `.sln`
-> are well-formed, every `ProjectReference` resolves, the solution config is consistent, and all
-> three `IComputeBackend` implementations cover the full interface. It was **not** compiled here
-> because this environment has no access to NuGet or the .NET SDK. Run `dotnet build` locally to
-> confirm; it is expected to build clean on the .NET 10 SDK.
+> **Verification note.** The scaffold has been compiled and tested on the .NET 10 SDK (10.0.301):
+> `dotnet build` succeeds with **0 warnings / 0 errors** across all 10 projects, and `dotnet test`
+> reports **18 passed, 1 skipped** (the S0-4 autograd placeholder), **0 failed**. Every `ProjectReference`
+> resolves, the solution config is consistent, and all three `IComputeBackend` implementations cover the
+> full interface. (TorchSharp is still commented out in `Backends.Torch`, so no libtorch is downloaded yet.)
