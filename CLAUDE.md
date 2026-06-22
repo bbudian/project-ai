@@ -112,8 +112,12 @@ hand-rolled reference (1e-4) for MHA/GQA/MQA, gradient-checked, causal, with con
 the model is runnable end-to-end**: `TransformerBlock` (pre-norm residual) + `LlamaModel` (embedding → N blocks →
 final norm → tied LM head) → logits `[batch, seq, vocab]`. An overfit test trains the full model to ~0 loss and
 greedily reproduces a sequence, and `dotnet run --project ProjectAI -- train` trains a tiny byte-level LLaMA from
-scratch (loss 5.6→0.003 in ~15s) and generates the corpus from a prompt. `dotnet test` is green (180 passing, 0 skipped).
-Next in Stage 1: **S1-9** (samplers: temperature/top-k/top-p) → **S1-10** (real training loop: batching, LR
-schedule, checkpointing) → **S1-11** (CLI: separate `train`/`generate`/`convert` with saved checkpoints).
+scratch (loss 5.6→0.003 in ~15s) and generates the corpus from a prompt. **S1-9 done** — `ISampler` with
+`GreedySampler` (argmax) and `TopKTopPSampler` (temperature → top-k → top-p nucleus, seeded `PcgRng` for
+reproducibility); wired into the CLI (`train [prompt] [--temp T] [--topk K] [--topp P] [--seed S]`, greedy by
+default; non-finite logits fall back to argmax, and the CLI flag parser fails fast on bad/unknown/out-of-range
+flags). `dotnet test` is green (193 passing, 0 skipped).
+Next in Stage 1: **S1-10** (real training loop: batching, LR schedule, checkpointing) → **S1-11** (CLI:
+separate `train`/`generate`/`convert` with saved checkpoints).
 (Deferred: KV-cache **decode** path S1-7b — inference-only; BPE external-tokenizer parity; `NamedParameters`
 ordering at S1-4 — see `docs/BUILD_PLAN.md`.)

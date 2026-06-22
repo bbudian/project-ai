@@ -369,12 +369,19 @@ generating. (Generation re-runs the full sequence each step; the KV-cache decode
   logits for a known open model within tolerance.
 - **Depends on:** S1-7, S1-3
 
-### S1-9 — Samplers
+### S1-9 — Samplers *(done)*
 - **Files:** `Models/Sampling.cs`
 - **Do:** greedy/argmax; temperature; top-k; top-p (nucleus); seedable RNG for reproducibility.
-- **Acceptance:** greedy is deterministic; temperature→0 approaches greedy; top-k/top-p restrict the
-  support set correctly (unit tests on crafted logits); fixed seed reproduces a sequence.
+- **Acceptance:** greedy is deterministic *(done)*; temperature→0 approaches greedy *(done)*; top-k/top-p
+  restrict the support set correctly (unit tests on crafted logits) *(done)*; fixed seed reproduces a
+  sequence *(done)*.
 - **Depends on:** S1-8, S0-7 (seedable RNG)
+- **Done:** `ISampler.Sample(ReadOnlySpan<float>)` with `GreedySampler` (argmax, ties→lowest index) and
+  `TopKTopPSampler` (temperature → top-k → top-p nucleus → renormalized multinomial via seeded `PcgRng`;
+  T≤0 ⇒ greedy). Wired into the `train` CLI command (`--temp/--topk/--topp/--seed`, greedy by default).
+  Hardened after an adversarial review: argmax skips NaN, a non-finite softmax sum falls back to argmax
+  (so a poisoned distribution can't silently sample the wrong token), empty logits throw, and the CLI
+  parser fails fast on unparseable/missing/unknown/out-of-range flags. 13 unit tests in `SamplingTests.cs`.
 
 ### S1-10 — Training loop
 - **Files:** `Training/Training.cs` (`Trainer`), `Training/Datasets.cs` (new)

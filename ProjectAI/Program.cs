@@ -1,3 +1,5 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using ProjectAI.Backends.Cpu;
 using ProjectAI.Core;
 using ProjectAI.Models;
@@ -19,8 +21,11 @@ switch (command)
         RunStage0Demo(backend);
         break;
     case "train":
-        RunLlmDemo(backend, args.Length > 1 ? string.Join(' ', args[1..]) : "roses are ");
+    {
+        var (prompt, sampler) = ParseGenerationArgs(args.Length > 1 ? args[1..] : []);
+        RunLlmDemo(backend, prompt, sampler);
         break;
+    }
     case "generate":
         Console.WriteLine("[generate] standalone generation needs checkpoint load/save (ticket S1-11).");
         Console.WriteLine("For now, `train [prompt]` trains a tiny model and generates in one run.");
@@ -30,14 +35,81 @@ switch (command)
         break;
     default:
         Console.WriteLine("Usage: projectai <demo|train|generate|convert>");
-        Console.WriteLine("  demo          Stage 0 milestone: fit y = Wx + b with our own autograd + AdamW.");
-        Console.WriteLine("  train [prompt] Train a tiny LLaMA on a built-in corpus, then generate from [prompt].");
+        Console.WriteLine("  demo            Stage 0 milestone: fit y = Wx + b with our own autograd + AdamW.");
+        Console.WriteLine("  train [prompt] [--temp T] [--topk K] [--topp P] [--seed S]");
+        Console.WriteLine("                  Train a tiny LLaMA on a built-in corpus, then generate from [prompt].");
+        Console.WriteLine("                  Default decoding is greedy; any sampling flag switches to temperature/top-k/top-p.");
         break;
+}
+
+// Parses the generation prompt and decoding flags. No sampling flag → deterministic greedy; otherwise a
+// seeded temperature/top-k/top-p sampler (S1-9). Non-flag tokens join into the prompt; a bad flag, missing
+// value, unknown flag, or out-of-range value fails fast with a usage message rather than being swallowed.
+static (string Prompt, ISampler Sampler) ParseGenerationArgs(string[] rest)
+{
+    float temperature = 1.0f;
+    int topK = 0;
+    float topP = 1.0f;
+    ulong seed = 0;
+    bool sample = false;
+    var promptParts = new List<string>();
+
+    for (int i = 0; i < rest.Length; i++)
+    {
+        string tok = rest[i];
+        switch (tok)
+        {
+            case "--temp": temperature = ParseFloatFlag(rest, ref i, tok); sample = true; break;
+            case "--topk": topK = ParseIntFlag(rest, ref i, tok); sample = true; break;
+            case "--topp": topP = ParseFloatFlag(rest, ref i, tok); sample = true; break;
+            case "--seed": seed = (ulong)ParseIntFlag(rest, ref i, tok); break;
+            default:
+                if (tok.StartsWith("--", StringComparison.Ordinal)) Fail($"unknown flag '{tok}'");
+                promptParts.Add(tok);
+                break;
+        }
+    }
+
+    if (temperature < 0f) Fail("--temp must be >= 0");
+    if (topK < 0) Fail("--topk must be >= 0");
+    if (topP <= 0f || topP > 1f) Fail("--topp must be in (0, 1]");
+
+    string prompt = promptParts.Count > 0 ? string.Join(' ', promptParts) : "roses are ";
+    ISampler sampler = sample
+        ? new TopKTopPSampler(new PcgRng(seed), temperature, topK, topP)
+        : new GreedySampler();
+    return (prompt, sampler);
+
+    static float ParseFloatFlag(string[] a, ref int i, string flag)
+    {
+        if (i + 1 >= a.Length) Fail($"{flag} expects a value");
+        // Reject non-finite ("nan"/"infinity") too: NaN evades every range comparison below and would
+        // silently fall back to greedy/unfiltered decoding, the opposite of what the sampling flag asked for.
+        if (!float.TryParse(a[++i], NumberStyles.Float, CultureInfo.InvariantCulture, out float v) || !float.IsFinite(v))
+            Fail($"{flag} expects a finite number, got '{a[i]}'");
+        return v;
+    }
+
+    static int ParseIntFlag(string[] a, ref int i, string flag)
+    {
+        if (i + 1 >= a.Length) Fail($"{flag} expects a value");
+        if (!int.TryParse(a[++i], NumberStyles.Integer, CultureInfo.InvariantCulture, out int v))
+            Fail($"{flag} expects an integer, got '{a[i]}'");
+        return v;
+    }
+
+    [DoesNotReturn]
+    static void Fail(string message)
+    {
+        Console.Error.WriteLine($"error: {message}");
+        Console.Error.WriteLine("usage: projectai train [prompt] [--temp T] [--topk K] [--topp P] [--seed S]");
+        Environment.Exit(2);
+    }
 }
 
 // Stage 1 milestone: train a tiny Llama-style transformer from scratch on a small corpus, then generate.
 // Everything below — embedding, RoPE, GQA attention, SwiGLU, RMSNorm, cross-entropy, AdamW — is hand-written.
-static void RunLlmDemo(IComputeBackend be, string prompt)
+static void RunLlmDemo(IComputeBackend be, string prompt, ISampler sampler)
 {
     // A few short, independent sentences — each learned from position 0, so any of them can be continued
     // from its start. (RoPE encodes ABSOLUTE position, so a tiny over-fit model memorizes position→token;
@@ -92,7 +164,8 @@ static void RunLlmDemo(IComputeBackend be, string prompt)
         }
     }
 
-    // Greedy generation: re-run the model on the growing sequence (no KV cache yet); stop at EOS.
+    // Generation: re-run the model on the growing sequence (no KV cache yet); pick each token via the
+    // sampler (greedy by default, or temperature/top-k/top-p from the CLI flags); stop at EOS.
     Console.WriteLine();
     Console.WriteLine($"Prompt:    \"{prompt}\"");
     var generated = new List<int>(tokenizer.Encode(prompt));
@@ -106,8 +179,7 @@ static void RunLlmDemo(IComputeBackend be, string prompt)
             var logits = model.Forward(be.FromHost(ToFloats(generated, 0, generated.Count), new Shape(1, generated.Count), DType.F32));
             var host = new float[logits.ElementCount];
             be.ToHost(logits, host);
-            int rowBase = (generated.Count - 1) * vocab, next = 0;
-            for (int v = 1; v < vocab; v++) if (host[rowBase + v] > host[rowBase + next]) next = v;
+            int next = sampler.Sample(host.AsSpan((generated.Count - 1) * vocab, vocab)); // last position's logits
             if (next == eos) break;
             generated.Add(next);
         }
