@@ -52,6 +52,27 @@ public sealed class AdamW : IOptimizer
     /// <summary>Number of <see cref="Step"/> calls so far.</summary>
     public int StepCount => _step;
 
+    /// <summary>A per-parameter moment snapshot (first/second moment + timestep), for checkpoint save/restore.</summary>
+    public readonly record struct MomentState(Tensor M, Tensor V, int T);
+
+    /// <summary>Reads the moment state for a parameter; false if the parameter has not been stepped yet.</summary>
+    public bool TryGetState(Tensor parameter, out MomentState state)
+    {
+        if (_state.TryGetValue(parameter, out var s) && s.M is not null)
+        {
+            state = new MomentState(s.M, s.V, s.T);
+            return true;
+        }
+        state = default;
+        return false;
+    }
+
+    /// <summary>Restores the moment state for a parameter (used when resuming from a checkpoint).</summary>
+    public void LoadState(Tensor parameter, MomentState state) => _state[parameter] = (state.M, state.V, state.T);
+
+    /// <summary>Restores the global step counter (so a resumed run continues the LR schedule).</summary>
+    public void SetStepCount(int step) => _step = step;
+
     /// <summary>
     /// One AdamW update: bias-corrected first/second moments with <em>decoupled</em> weight decay
     /// (the decay term acts on the parameter, not through the moment estimates). Runs entirely on the

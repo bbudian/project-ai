@@ -1,0 +1,49 @@
+using Godot;
+
+// The scrollable conversation column. It owns the list of TurnCards and nothing else: Begin starts a new turn
+// (returning its card so the caller can Resolve/Fail it later) and Clear resets to the empty placeholder. The
+// view never reaches in to mutate cards directly.
+public partial class Transcript : ScrollContainer
+{
+    private VBoxContainer _column;
+    private Control _placeholder;
+
+    public override void _Ready()
+    {
+        HorizontalScrollMode = ScrollMode.Disabled;
+        SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        SizeFlagsVertical = SizeFlags.ExpandFill;
+
+        _column = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        _column.AddThemeConstantOverride("separation", 12);
+        AddChild(_column);
+
+        ShowPlaceholder();
+    }
+
+    /// <summary>Starts a new turn for <paramref name="prompt"/> and returns its card to resolve later.</summary>
+    public TurnCard Begin(string prompt)
+    {
+        if (_placeholder != null) { _placeholder.QueueFree(); _placeholder = null; }
+
+        var card = new TurnCard(prompt) { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        _column.AddChild(card);
+        Callable.From(ScrollToBottom).CallDeferred(); // after layout settles
+        return card;
+    }
+
+    public void Clear()
+    {
+        foreach (var child in _column.GetChildren()) child.QueueFree();
+        _placeholder = null;
+        ShowPlaceholder();
+    }
+
+    public void ScrollToBottom() => ScrollVertical = (int)GetVScrollBar().MaxValue;
+
+    private void ShowPlaceholder()
+    {
+        _placeholder = Palette.Heading("Type a prompt below and press Send.", 14, Palette.Muted);
+        _column.AddChild(_placeholder);
+    }
+}

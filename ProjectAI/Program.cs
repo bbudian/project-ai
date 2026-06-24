@@ -4,6 +4,7 @@ using ProjectAI.Backends.Cpu;
 using ProjectAI.Core;
 using ProjectAI.Models;
 using ProjectAI.Tokenizers;
+using ProjectAI.Training;
 
 Console.WriteLine("ProjectAI — local, hand-written AI runtime (.NET 10)");
 Console.WriteLine();
@@ -22,36 +23,77 @@ switch (command)
         break;
     case "train":
     {
-        var (prompt, sampler) = ParseGenerationArgs(args.Length > 1 ? args[1..] : []);
-        RunLlmDemo(backend, prompt, sampler);
+        var opts = ParseCliOptions(args.Length > 1 ? args[1..] : []);
+        if (opts.Data is not null) RunTrainFile(backend, opts);
+        else RunLlmDemo(backend, opts.Prompt, opts.Sampler, opts.Name);
         break;
     }
     case "generate":
-        Console.WriteLine("[generate] standalone generation needs checkpoint load/save (ticket S1-11).");
-        Console.WriteLine("For now, `train [prompt]` trains a tiny model and generates in one run.");
+    {
+        var opts = ParseCliOptions(args.Length > 1 ? args[1..] : []);
+        if (opts.Load is null)
+        {
+            Console.Error.WriteLine("error: generate requires --load <checkpoint> (train first to create one)");
+            Environment.Exit(2);
+        }
+        RunGenerate(backend, opts.Load, opts.Prompt, opts.Sampler);
         break;
+    }
+    case "serve":
+    {
+        var opts = ParseCliOptions(args.Length > 1 ? args[1..] : []);
+        string modelsDir;
+        string defaultModel;
+        if (opts.Load is not null) // --load <file>: that model is the default, its folder is the picker source
+        {
+            modelsDir = Path.GetDirectoryName(opts.Load) is { Length: > 0 } dir ? dir : ".";
+            defaultModel = Path.GetFileNameWithoutExtension(opts.Load);
+        }
+        else
+        {
+            modelsDir = opts.Models ?? "checkpoints";
+            defaultModel = "model";
+        }
+        Server.Run(backend, modelsDir, defaultModel, opts.Port);
+        break;
+    }
     case "convert":
-        Console.WriteLine("[convert] safetensors / GGUF import — ticket S1-4/S1-5. See docs/BUILD_PLAN.md.");
+    {
+        var opts = ParseCliOptions(args.Length > 1 ? args[1..] : []);
+        RunConvert(backend, opts.Prompt, opts.Name);
         break;
+    }
     default:
-        Console.WriteLine("Usage: projectai <demo|train|generate|convert>");
+        Console.WriteLine("Usage: projectai <demo|train|generate|serve|convert>");
         Console.WriteLine("  demo            Stage 0 milestone: fit y = Wx + b with our own autograd + AdamW.");
-        Console.WriteLine("  train [prompt] [--temp T] [--topk K] [--topp P] [--seed S]");
-        Console.WriteLine("                  Train a tiny LLaMA on a built-in corpus, then generate from [prompt].");
+        Console.WriteLine("  train [prompt] [--name M] [--data <file>] [--steps N] [--batch B] [--seqlen S] [--lr X] [--temp T] [--topk K] [--topp P] [--seed S]");
+        Console.WriteLine("                  No --data: train a tiny LLaMA on a built-in corpus. With --data <file>: train on");
+        Console.WriteLine("                  your own text. Saves checkpoints/<name>.ckpt (--name, default 'model') for the picker.");
+        Console.WriteLine("  generate --load <checkpoint> [prompt] [--temp T] [--topk K] [--topp P] [--seed S]");
+        Console.WriteLine("                  Reload a saved checkpoint (architecture read from the file) and generate.");
+        Console.WriteLine("  serve [--models <dir>] [--load <checkpoint>] [--port N]");
+        Console.WriteLine("                  Serve an HTTP API (POST /generate, GET /health, GET /models) over a directory of");
+        Console.WriteLine("                  trained .ckpt models (default ./checkpoints) so the UI client can pick a model.");
+        Console.WriteLine("  convert <hf-model-dir> [--name M]");
+        Console.WriteLine("                  Convert a HuggingFace Llama checkpoint (config.json + .safetensors) to a .ckpt.");
         Console.WriteLine("                  Default decoding is greedy; any sampling flag switches to temperature/top-k/top-p.");
         break;
 }
 
-// Parses the generation prompt and decoding flags. No sampling flag → deterministic greedy; otherwise a
-// seeded temperature/top-k/top-p sampler (S1-9). Non-flag tokens join into the prompt; a bad flag, missing
-// value, unknown flag, or out-of-range value fails fast with a usage message rather than being swallowed.
-static (string Prompt, ISampler Sampler) ParseGenerationArgs(string[] rest)
+// Parses the prompt, decoding flags, and (for train) data/hyperparameter flags. No sampling flag → greedy;
+// otherwise a seeded temperature/top-k/top-p sampler (S1-9). Non-flag tokens join into the prompt; a bad flag,
+// missing value, unknown flag, or out-of-range value fails fast with a usage message rather than being swallowed.
+static CliOptions ParseCliOptions(string[] rest)
 {
     float temperature = 1.0f;
     int topK = 0;
     float topP = 1.0f;
     ulong seed = 0;
     bool sample = false;
+    string? load = null, data = null, models = null;
+    string name = "model";
+    int steps = 400, batch = 8, seqLen = 64, port = 8080;
+    float lr = 3e-3f;
     var promptParts = new List<string>();
 
     for (int i = 0; i < rest.Length; i++)
@@ -63,6 +105,15 @@ static (string Prompt, ISampler Sampler) ParseGenerationArgs(string[] rest)
             case "--topk": topK = ParseIntFlag(rest, ref i, tok); sample = true; break;
             case "--topp": topP = ParseFloatFlag(rest, ref i, tok); sample = true; break;
             case "--seed": seed = (ulong)ParseIntFlag(rest, ref i, tok); break;
+            case "--load": load = ParseStringFlag(rest, ref i, tok); break;
+            case "--data": data = ParseStringFlag(rest, ref i, tok); break;
+            case "--models": models = ParseStringFlag(rest, ref i, tok); break;
+            case "--name": name = ParseStringFlag(rest, ref i, tok); break;
+            case "--steps": steps = ParseIntFlag(rest, ref i, tok); break;
+            case "--batch": batch = ParseIntFlag(rest, ref i, tok); break;
+            case "--seqlen": seqLen = ParseIntFlag(rest, ref i, tok); break;
+            case "--lr": lr = ParseFloatFlag(rest, ref i, tok); break;
+            case "--port": port = ParseIntFlag(rest, ref i, tok); break;
             default:
                 if (tok.StartsWith("--", StringComparison.Ordinal)) Fail($"unknown flag '{tok}'");
                 promptParts.Add(tok);
@@ -73,12 +124,19 @@ static (string Prompt, ISampler Sampler) ParseGenerationArgs(string[] rest)
     if (temperature < 0f) Fail("--temp must be >= 0");
     if (topK < 0) Fail("--topk must be >= 0");
     if (topP <= 0f || topP > 1f) Fail("--topp must be in (0, 1]");
+    if (steps < 1) Fail("--steps must be >= 1");
+    if (batch < 1) Fail("--batch must be >= 1");
+    if (seqLen < 1 || seqLen > 8192) Fail("--seqlen must be in [1, 8192]"); // cap RoPE-table / memory blow-up
+    if (lr <= 0f) Fail("--lr must be > 0");
+    if (port is < 1 or > 65535) Fail("--port must be in [1, 65535]");
+    if (name.Length == 0 || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name != Path.GetFileName(name))
+        Fail("--name must be a simple file name (no path separators)");
 
     string prompt = promptParts.Count > 0 ? string.Join(' ', promptParts) : "roses are ";
     ISampler sampler = sample
         ? new TopKTopPSampler(new PcgRng(seed), temperature, topK, topP)
         : new GreedySampler();
-    return (prompt, sampler);
+    return new CliOptions(prompt, sampler, load, data, models, name, steps, batch, seqLen, lr, port);
 
     static float ParseFloatFlag(string[] a, ref int i, string flag)
     {
@@ -98,6 +156,12 @@ static (string Prompt, ISampler Sampler) ParseGenerationArgs(string[] rest)
         return v;
     }
 
+    static string ParseStringFlag(string[] a, ref int i, string flag)
+    {
+        if (i + 1 >= a.Length) Fail($"{flag} expects a value");
+        return a[++i];
+    }
+
     [DoesNotReturn]
     static void Fail(string message)
     {
@@ -109,14 +173,14 @@ static (string Prompt, ISampler Sampler) ParseGenerationArgs(string[] rest)
 
 // Stage 1 milestone: train a tiny Llama-style transformer from scratch on a small corpus, then generate.
 // Everything below — embedding, RoPE, GQA attention, SwiGLU, RMSNorm, cross-entropy, AdamW — is hand-written.
-static void RunLlmDemo(IComputeBackend be, string prompt, ISampler sampler)
+static void RunLlmDemo(IComputeBackend be, string prompt, ISampler sampler, string name)
 {
     // A few short, independent sentences — each learned from position 0, so any of them can be continued
     // from its start. (RoPE encodes ABSOLUTE position, so a tiny over-fit model memorizes position→token;
     // training each sentence from position 0 is what lets an arbitrary in-corpus prompt continue correctly.)
     string[] lines = ["roses are red", "violets are blue", "sugar is sweet", "and so are you"];
     var tokenizer = new BpeTokenizer([]); // byte-level (vocab = 259)
-    int vocab = tokenizer.VocabSize, pad = tokenizer.PadId, eos = tokenizer.EosId;
+    int pad = tokenizer.PadId, eos = tokenizer.EosId;
 
     // Tokenize each (append EOS), pad into a [sentences, T] batch; the loss ignores the padding.
     var seqs = lines.Select(line => { var e = tokenizer.Encode(line).ToList(); e.Add(eos); return e; }).ToList();
@@ -135,11 +199,7 @@ static void RunLlmDemo(IComputeBackend be, string prompt, ISampler sampler)
     var input = be.FromHost(inputBuf, new Shape(n, T), DType.F32);
     var target = be.FromHost(targetBuf, new Shape(n, T), DType.F32);
 
-    var config = new ModelConfig
-    {
-        VocabSize = vocab, EmbeddingDim = 64, LayerCount = 2, HeadCount = 4, KvHeadCount = 2,
-        FeedForwardHiddenDim = 256, MaxSequenceLength = 128,
-    };
+    var config = DemoConfig();
     var ctx = ParameterContext.Create(be, 0);
     var model = new LlamaModel(ctx, config);
     var optimizer = new AdamW(model.Parameters().ToList(), be, learningRate: 0.003f, weightDecay: 0f);
@@ -164,35 +224,129 @@ static void RunLlmDemo(IComputeBackend be, string prompt, ISampler sampler)
         }
     }
 
-    // Generation: re-run the model on the growing sequence (no KV cache yet); pick each token via the
-    // sampler (greedy by default, or temperature/top-k/top-p from the CLI flags); stop at EOS.
-    Console.WriteLine();
-    Console.WriteLine($"Prompt:    \"{prompt}\"");
-    var generated = new List<int>(tokenizer.Encode(prompt));
-    if (generated.Count == 0) generated.Add((int)' ');
-    if (generated.Count >= config.MaxSequenceLength)
-        generated = generated.Skip(generated.Count - (config.MaxSequenceLength - 1)).ToList();
-    using (GradMode.NoGrad())
-    {
-        for (int t = 0; t < 48 && generated.Count < config.MaxSequenceLength; t++)
-        {
-            var logits = model.Forward(be.FromHost(ToFloats(generated, 0, generated.Count), new Shape(1, generated.Count), DType.F32));
-            var host = new float[logits.ElementCount];
-            be.ToHost(logits, host);
-            int next = sampler.Sample(host.AsSpan((generated.Count - 1) * vocab, vocab)); // last position's logits
-            if (next == eos) break;
-            generated.Add(next);
-        }
-    }
-    Console.WriteLine($"Generated: \"{tokenizer.Decode(generated)}\"");
+    // Persist the trained model (weights + config + tokenizer) so `generate --load` can reproduce it.
+    SaveAndAnnounce(be, model, config, tokenizer, steps, name);
+    Generate(be, model, tokenizer, prompt, sampler, config);
 }
 
-static float[] ToFloats(IReadOnlyList<int> ids, int start, int count)
+// Trains on a user-provided text file via the real Trainer (batched, warmup+cosine LR), saves a config-bearing
+// checkpoint, then generates from the prompt.
+static void RunTrainFile(IComputeBackend be, CliOptions opts)
 {
-    var f = new float[count];
-    for (int i = 0; i < count; i++) f[i] = ids[start + i];
-    return f;
+    if (!File.Exists(opts.Data!))
+    {
+        Console.Error.WriteLine($"error: data file '{opts.Data}' not found");
+        Environment.Exit(2);
+    }
+    string text = File.ReadAllText(opts.Data!);
+    var tokenizer = new BpeTokenizer([]); // byte-level
+    var config = DemoConfig() with { MaxSequenceLength = Math.Max(DemoConfig().MaxSequenceLength, opts.SeqLen) };
+
+    TextDataset dataset;
+    try { dataset = new TextDataset(text, tokenizer, opts.SeqLen); }
+    catch (ArgumentException ex) { Console.Error.WriteLine($"error: {ex.Message}"); Environment.Exit(2); return; }
+
+    var model = new LlamaModel(ParameterContext.Create(be, 0), config);
+    long paramCount = model.Parameters().Sum(p => p.ElementCount);
+    Console.WriteLine($"Training a tiny LLaMA ({config.LayerCount} layers, dModel {config.EmbeddingDim}, ~{paramCount:N0} params)");
+    Console.WriteLine($"on '{opts.Data}' — {dataset.Count} blocks of {opts.SeqLen} tokens, batch {opts.Batch}, {opts.Steps} steps.");
+    Console.WriteLine();
+
+    var report = new Trainer(be).Train(model, dataset, new TrainingConfig
+    {
+        BatchSize = opts.Batch, SequenceLength = opts.SeqLen, LearningRate = opts.Lr, MaxSteps = opts.Steps,
+        WarmupSteps = Math.Min(100, opts.Steps / 10), Seed = 0, CheckpointDirectory = "",
+        OnStep = (step, loss) => { if (step == 1 || step % 20 == 0) Console.WriteLine($"  step {step,4}   loss {loss:F4}"); },
+    });
+    Console.WriteLine($"  loss {report.FirstLoss:F3} → {report.LastLoss:F3}  ({report.FinalStep} steps)");
+
+    SaveAndAnnounce(be, model, config, tokenizer, report.FinalStep, opts.Name);
+    Generate(be, model, tokenizer, opts.Prompt, opts.Sampler, config);
 }
+
+static void SaveAndAnnounce(IComputeBackend be, LlamaModel model, ModelConfig config, BpeTokenizer tokenizer, int step, string name)
+{
+    string checkpoint = Path.Combine("checkpoints", name + ".ckpt");
+    Directory.CreateDirectory("checkpoints");
+    Checkpointing.SaveModel(checkpoint, model, config, tokenizer, step, optimizer: null, be);
+    Console.WriteLine();
+    Console.WriteLine($"Saved checkpoint → {checkpoint}   (serve it with: serve   →   pick '{name}' in the client)");
+}
+
+// Converts a HuggingFace Llama checkpoint (config.json + .safetensors) into our model and saves it. Weights
+// only — the model's own tokenizer is a separate step, so text isn't meaningful until that lands.
+static void RunConvert(IComputeBackend be, string source, string name)
+{
+    if (string.IsNullOrWhiteSpace(source) || (!File.Exists(source) && !Directory.Exists(source)))
+    {
+        Console.Error.WriteLine($"error: convert needs a HuggingFace model directory or .safetensors file; got '{source}'");
+        Console.Error.WriteLine("usage: projectai convert <model-dir> [--name <out>]");
+        Environment.Exit(2);
+    }
+
+    Console.WriteLine($"Converting '{source}' …");
+    LlamaModel model;
+    ModelConfig config;
+    try
+    {
+        (model, config) = Converter.Load(source, be);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"error: {ex.Message}");
+        Environment.Exit(2);
+        return;
+    }
+
+    long paramCount = model.Parameters().Sum(p => p.ElementCount);
+    Console.WriteLine($"Loaded {config.LayerCount} layers, dModel {config.EmbeddingDim}, {config.HeadCount} heads (KV {config.KvHeadCount}), vocab {config.VocabSize} — ~{paramCount:N0} params.");
+
+    // Use the model's own tokenizer (tokenizer.json) so generation is meaningful; fall back to a placeholder.
+    ITokenizer tokenizer = Converter.TryLoadTokenizer(source) ?? (ITokenizer)new BpeTokenizer([]);
+    bool realTokenizer = tokenizer is HfTokenizer;
+
+    Directory.CreateDirectory("checkpoints");
+    string checkpoint = Path.Combine("checkpoints", name + ".ckpt");
+    Checkpointing.SaveModel(checkpoint, model, config, tokenizer, step: 0, optimizer: null, be);
+    Console.WriteLine($"Saved → {checkpoint}");
+    if (realTokenizer)
+        Console.WriteLine($"Loaded the model's tokenizer (vocab {tokenizer.VocabSize}). Serve it, then pick '{name}' in the client.");
+    else
+    {
+        Console.WriteLine();
+        Console.WriteLine("NOTE: no tokenizer.json found — saved with a placeholder byte-level tokenizer, so generated");
+        Console.WriteLine("text won't be meaningful. Put the model's tokenizer.json next to its weights and re-run convert.");
+    }
+}
+
+// Loads a saved checkpoint — rebuilding the model from the config stored in the file — and generates.
+static void RunGenerate(IComputeBackend be, string checkpoint, string prompt, ISampler sampler)
+{
+    if (!File.Exists(checkpoint))
+    {
+        Console.Error.WriteLine($"error: checkpoint '{checkpoint}' not found (run `train` first)");
+        Environment.Exit(2);
+    }
+    var (model, config, tokenizer, step) = Checkpointing.LoadModel(checkpoint, be);
+    Console.WriteLine($"Loaded checkpoint '{checkpoint}' (step {step}, {config.LayerCount} layers, dModel {config.EmbeddingDim}).");
+    Generate(be, model, tokenizer, prompt, sampler, config);
+}
+
+// Prints a prompt and its continuation, decoding via the shared inference core (used by the CLI demos).
+static void Generate(IComputeBackend be, LlamaModel model, ITokenizer tokenizer, string prompt, ISampler sampler, ModelConfig config)
+{
+    Console.WriteLine();
+    Console.WriteLine($"Prompt:    \"{prompt}\"");
+    string text = Inference.GenerateText(be, model, tokenizer, config, prompt, sampler, maxTokens: 48);
+    Console.WriteLine($"Generated: \"{text}\"");
+}
+
+// The fixed architecture shared by `train` (which saves it) and `generate` (which restores it).
+static ModelConfig DemoConfig() => new()
+{
+    VocabSize = 259, EmbeddingDim = 64, LayerCount = 2, HeadCount = 4, KvHeadCount = 2,
+    FeedForwardHiddenDim = 256, MaxSequenceLength = 128,
+};
 
 // Stage 0 milestone (BUILD_PLAN.md §6): train a tiny linear model to near-zero loss using only our
 // Tensor + autograd + AdamW on the CPU backend — the first time the engine visibly *learns*.
@@ -255,3 +409,8 @@ static void RunStage0Demo(IComputeBackend be)
     Console.WriteLine($"learned W ≈ [{string.Join(", ", wOut.Select(v => v.ToString("F3")))}]   (true [2, -3, 0.5])");
     Console.WriteLine($"learned b ≈ {bOut[0]:F3}   (true 1.5)");
 }
+
+// Parsed CLI options shared across commands: the prompt, decoder, optional checkpoint to load, the training
+// data file + hyperparameters (train --data), and the serve port.
+internal sealed record CliOptions(
+    string Prompt, ISampler Sampler, string? Load, string? Data, string? Models, string Name, int Steps, int Batch, int SeqLen, float Lr, int Port);

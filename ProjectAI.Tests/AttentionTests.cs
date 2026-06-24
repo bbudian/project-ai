@@ -233,13 +233,68 @@ public class AttentionTests
     }
 
     [Fact]
-    public void Attention_RejectsKvCacheDecode_UntilFollowUp()
+    public void Attention_KvCacheDecode_MatchesFullSequence()
     {
         using var be = new CpuComputeBackend();
-        var ctx = ParameterContext.Create(be, 1);
-        var attn = new Attention(ctx, Config(4, 2));
+        var config = Config(4, 2); // h=4, kvh=2 → grouped-query
+        var attn = new Attention(ParameterContext.Create(be, 9), config, layerIndex: 0);
+        const int s = 5, d = 8;
+        var x = Rand(new Random(3), s * d);
+
+        // Reference: one full-sequence forward.
+        var full = Host(be, attn.Forward(be.FromHost(x, new Shape(1, s, d), DType.F32)));
+
+        // Incremental: feed one token at a time through the cache; each step's single output must match.
+        var cache = new KvCache(be, config, maxBatch: 1, maxSequenceLength: 16);
+        var got = new float[s * d];
+        using (GradMode.NoGrad())
+            for (int t = 0; t < s; t++)
+            {
+                var token = be.FromHost(x.AsSpan(t * d, d).ToArray(), new Shape(1, 1, d), DType.F32);
+                var output = Host(be, attn.Forward(token, ForwardContext.Inference() with { Cache = cache }));
+                Array.Copy(output, 0, got, t * d, d);
+            }
+
+        for (int i = 0; i < full.Length; i++)
+            Assert.True(MathF.Abs(full[i] - got[i]) <= 1e-4f, $"pos {i / d} dim {i % d}: full {full[i]} vs decode {got[i]}");
+    }
+
+    [Fact]
+    public void Attention_KvCacheChunkedPrefill_MatchesFullSequence()
+    {
+        using var be = new CpuComputeBackend();
+        var config = Config(4, 2);
+        var attn = new Attention(ParameterContext.Create(be, 9), config, layerIndex: 0);
+        const int s = 6, d = 8, split = 4; // prefill 4 tokens, then feed the remaining 2 as one chunk
+        var x = Rand(new Random(5), s * d);
+
+        var full = Host(be, attn.Forward(be.FromHost(x, new Shape(1, s, d), DType.F32)));
+
+        var cache = new KvCache(be, config, maxBatch: 1, maxSequenceLength: 16);
+        var got = new float[s * d];
+        using (GradMode.NoGrad())
+        {
+            var chunk1 = be.FromHost(x.AsSpan(0, split * d).ToArray(), new Shape(1, split, d), DType.F32);
+            Array.Copy(Host(be, attn.Forward(chunk1, ForwardContext.Inference() with { Cache = cache })), 0, got, 0, split * d);
+
+            // queryLen = s - split (> 1) at posOffset = split (> 0): the chunked-prefill path.
+            var chunk2 = be.FromHost(x.AsSpan(split * d, (s - split) * d).ToArray(), new Shape(1, s - split, d), DType.F32);
+            Array.Copy(Host(be, attn.Forward(chunk2, ForwardContext.Inference() with { Cache = cache })), 0, got, split * d, (s - split) * d);
+        }
+
+        for (int i = 0; i < full.Length; i++)
+            Assert.True(MathF.Abs(full[i] - got[i]) <= 1e-4f, $"pos {i / d} dim {i % d}: full {full[i]} vs chunked {got[i]}");
+    }
+
+    [Fact]
+    public void Attention_KvCacheDecode_RejectsGradMode()
+    {
+        using var be = new CpuComputeBackend();
+        var config = Config(4, 2);
+        var attn = new Attention(ParameterContext.Create(be, 1), config);
         var x = be.FromHost(Rand(new Random(1), 1 * 1 * 8), new Shape(1, 1, 8), DType.F32);
-        var cache = new KvCache(Config(4, 2), maxBatch: 1, maxSequenceLength: 16);
-        Assert.Throws<NotImplementedException>(() => attn.Forward(x, ForwardContext.Decode(cache, x)));
+        var cache = new KvCache(be, config, maxBatch: 1, maxSequenceLength: 16);
+        // The decode path is inference-only; using it with grad enabled must fail loudly.
+        Assert.Throws<InvalidOperationException>(() => attn.Forward(x, ForwardContext.Inference() with { Cache = cache }));
     }
 }

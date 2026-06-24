@@ -8,16 +8,14 @@ namespace ProjectAI.Tokenizers;
 public interface ITokenizer
 {
     int VocabSize { get; }
+    int BosId { get; }
+    int EosId { get; }
     IReadOnlyList<int> Encode(string text, bool addBos = false, bool addEos = false);
     string Decode(IReadOnlyList<int> ids);
 }
 
 /// <summary>Byte-Pair-Encoding tokenizer. Trained from a corpus or loaded from a vocab/merges file.</summary>
-public interface IBpeTokenizer : ITokenizer
-{
-    int BosId { get; }
-    int EosId { get; }
-}
+public interface IBpeTokenizer : ITokenizer;
 
 /// <summary>
 /// Byte-level BPE over UTF-8 (GPT-2 style), ticket S1-1. The base vocabulary is the 256 byte values,

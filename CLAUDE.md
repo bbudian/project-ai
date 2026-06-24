@@ -116,8 +116,44 @@ scratch (loss 5.6→0.003 in ~15s) and generates the corpus from a prompt. **S1-
 `GreedySampler` (argmax) and `TopKTopPSampler` (temperature → top-k → top-p nucleus, seeded `PcgRng` for
 reproducibility); wired into the CLI (`train [prompt] [--temp T] [--topk K] [--topp P] [--seed S]`, greedy by
 default; non-finite logits fall back to argmax, and the CLI flag parser fails fast on bad/unknown/out-of-range
-flags). `dotnet test` is green (193 passing, 0 skipped).
-Next in Stage 1: **S1-10** (real training loop: batching, LR schedule, checkpointing) → **S1-11** (CLI:
-separate `train`/`generate`/`convert` with saved checkpoints).
-(Deferred: KV-cache **decode** path S1-7b — inference-only; BPE external-tokenizer parity; `NamedParameters`
-ordering at S1-4 — see `docs/BUILD_PLAN.md`.)
+flags). **S1-10 done** — the real training loop: `Trainer` (forward → cross-entropy → backward → AdamW, with
+gradient accumulation via leaf-grad accumulation and a warmup+cosine LR schedule), `TextDataset` (tokenize + pack
+into next-token blocks), and a self-contained little-endian `Checkpoint` (model weights + AdamW moments + step) —
+training reload reproduces **bit-identical logits**, resume restores step+moments, and grad-accum matches a full
+batch. Wired into the CLI: `train` saves `checkpoints/model.ckpt`; `generate --load <ckpt>` reloads and decodes
+with no retraining. (Hardened after an adversarial review: the checkpoint loader validates payload length/rank/
+dims against the declared shape; the grad-accumulation equal-token invariant and the resume timestep assumption
+are documented; the LR warmup is clamped below the step total.) **S1-11 done** — the usable training CLI:
+checkpoints now carry their `ModelConfig` + tokenizer (checkpoint format v2 with a metadata string;
+`Checkpointing.SaveModel`/`LoadModel`), so `generate --load` rebuilds the model from the file — no hardcoded
+config, and an architecture mismatch is a clear error. `train --data <file> [--steps/--batch/--seqlen/--lr]`
+trains on your own text via the real `Trainer` (with a per-step progress callback); default `train` stays the
+quick built-in demo. (Hardened after review: the checkpoint loader length-checks the metadata/name regions too,
+not just the payload; `--seqlen` is capped to avoid RoPE-table blow-up.) **S1-4 done** — `SafetensorsLoader`
+reads a `.safetensors` file into a `StateDict`, materializing every dtype as F32 (F32 bit-exact, BF16 exact
+upper-16-bits widening, F16 via `Half`, F64/ints cast); defensive against malformed input (bounds, overflow,
+duplicate names, full-coverage check, non-numeric offsets, little-endian-host guard), reads tensors by seeking.
+**S1-7b done** — KV-cache incremental decode: `Attention` projects/RoPEs only the new tokens at the cached
+position offset, appends this layer's K/V to a `KvCache`, and attends over the full history (per-layer
+`layerIndex`; inference-only via `GradMode`); generation prefills then decodes one token per step instead of
+re-running the whole sequence. Decode reproduces the full-forward logits (tested to 1e-3, incl. chunked prefill);
+the cache guards layer/batch/length bounds and documents its single-stream / uniform-batch assumption.
+`dotnet test` is green (218 passing, 0 skipped).
+**HTTP API + UI client**: `projectai serve [--models <dir>] [--port N]` serves a local JSON API over
+`HttpListener` (`GET /health`, `GET /models`, `POST /generate`; request body capped, inputs validated, no web
+framework dependency; `Server.cs`/`ModelRegistry.cs`/`Inference.cs`) over a directory of trained `.ckpt` models —
+each request names a model, loaded once and cached, with path-traversal protection. A Godot 4.7 C# client
+(DRY/SOLID components: `ApiClient`, `Sidebar`, `Transcript`, `Composer` with a **model picker**, `Palette`) in
+`Client/ai-client/` is the Claude-desktop-style front end.
+**`convert` done (Tier 2)** — `Converter` + the `convert` CLI map a HuggingFace Llama `config.json` +
+`.safetensors` into a `LlamaModel` (HF tensor-name remap; no RoPE permutation since we already use HF's
+rotate-half convention; fails loudly on untied embeddings / QK-norm / non-SiLU / attention-bias / **rope_scaling**).
+It also loads the model's `tokenizer.json` via **`HfTokenizer`** (faithful byte-level BPE: GPT-2 byte↔unicode map,
+rank-ordered merges, EOS/BOS by id) so generated text is meaningful. Checkpoints are now tokenizer-agnostic
+(`bpe`/`hf` kinds) and the whole inference path uses `ITokenizer`. Synthetic tests cover the weight round-trip
+(bit-identical), the arch guards, the HF-BPE encode/decode (incl. splitting added/special tokens out before BPE), and the `hf`-checkpoint
+round-trip. `dotnet test` is green (233 passing, 0 skipped). *(Caveat: CPU/F32 → only small models are practical; byte-exact HF tokenizer
+parity and the real end-to-end run happen on the user's machine — no model download in this sandbox.)*
+Next in Stage 1: **S1-5** (GGUF); then **Stage 2** GPU backends to make real models fast.
+(Deferred: `NamedParameters` ordering at S1-4; **RoPE scaling** + Llama-3 pre-tokenizer regex in convert; paged
+KV cache (S3-4) — see `docs/BUILD_PLAN.md`.)

@@ -24,6 +24,36 @@ public class LlamaModelTests
     }
 
     [Fact]
+    public void Generate_WithKvCache_MatchesFullForward()
+    {
+        using var be = new CpuComputeBackend();
+        var config = TinyConfig() with { LayerCount = 2 };
+        var model = new LlamaModel(ParameterContext.Create(be, 7), config);
+        int[] tokens = [1, 2, 3, 4, 5, 6];
+        int vocab = config.VocabSize;
+
+        // Reference: one full forward; keep the last position's logits.
+        var refLogits = new float[tokens.Length * vocab];
+        using (GradMode.NoGrad())
+            be.ToHost(model.Forward(be.FromHost(tokens.Select(t => (float)t).ToArray(), new Shape(1, tokens.Length), DType.F32)), refLogits);
+
+        // Incremental: feed tokens one at a time through a KV cache; the last step's logits must match.
+        var cache = new KvCache(be, config, maxBatch: 1, maxSequenceLength: 32);
+        var stepLogits = new float[vocab];
+        using (GradMode.NoGrad())
+            foreach (int token in tokens)
+            {
+                var step = be.FromHost([token], new Shape(1, 1), DType.F32);
+                be.ToHost(model.Forward(step, ForwardContext.Inference() with { Cache = cache }), stepLogits);
+            }
+
+        int last = (tokens.Length - 1) * vocab;
+        for (int v = 0; v < vocab; v++)
+            Assert.True(MathF.Abs(refLogits[last + v] - stepLogits[v]) <= 1e-3f,
+                $"vocab {v}: full {refLogits[last + v]} vs cached {stepLogits[v]}");
+    }
+
+    [Fact]
     public void Overfits_TwoLayerModel()
     {
         using var be = new CpuComputeBackend();

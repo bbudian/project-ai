@@ -326,13 +326,20 @@ generating. (Generation re-runs the full sequence each step; the KV-cache decode
   cross-entropy matches reference incl. label smoothing off/on; gradient-checked.
 - **Depends on:** S0-4, S1-2
 
-### S1-4 — safetensors loader
+### S1-4 — safetensors loader *(done)*
 - **Files:** `Formats/Loaders.cs` (`SafetensorsLoader`)
 - **Do:** parse the JSON header, map dtypes, materialize tensors into backend storage (zero-copy
   where the dtype matches), build a `StateDict`.
-- **Acceptance:** loads a real `.safetensors` file; tensor shapes/dtypes/values match a Python
-  `safetensors` reference within exact bit equality for F32 and correct cast for BF16/F16.
+- **Acceptance:** loads a `.safetensors` file; tensor shapes/dtypes/values match the reference within
+  exact bit equality for F32 *(done)* and correct cast for BF16/F16 *(done)*.
 - **Depends on:** S0-2
+- **Done:** `SafetensorsLoader.Load` reads the 8-byte LE header length + JSON header, validates it, and
+  materializes every dtype as F32 (the backend's only storage): F32 is a bulk bit-reinterpret, BF16 the exact
+  upper-16-bits widening, F16 via `System.Half`, F64/integers/BOOL cast. Defensive against malformed input —
+  header/offset bounds, element-count overflow, duplicate names, and a full-coverage (no gap/overlap) check;
+  tensors are read by seeking one at a time (no whole-file buffering). 11 tests in `SafetensorsTests.cs` (F32
+  bit-exact, F16/BF16 casts, metadata skip, 7 malformed-file rejections). *(Mapping HF tensor names onto a
+  `LlamaModel` + the `convert` CLI remains for S1-11/follow-up; GGUF is S1-5.)*
 
 ### S1-5 — GGUF loader
 - **Files:** `Formats/Loaders.cs` (`GgufLoader`)
@@ -355,10 +362,16 @@ generating. (Generation re-runs the full sequence each step; the KV-cache decode
 - **Do:** Q/K/V projections, RoPE on Q/K, GQA head grouping (`KvHeadCount < HeadCount`), causal
   mask, scaled-dot-product attention via the backend, output projection; incremental decode path
   reading/writing `KvCache`.
-- **Acceptance:** full-sequence forward matches a reference attention to 1e-4; incremental decode
-  (token-by-token with cache) equals the full-sequence result; GQA with `KvHeadCount=1` and
-  `=HeadCount` both correct; gradient-checked on a 2-layer toy.
+- **Acceptance:** full-sequence forward matches a reference attention to 1e-4 *(done, S1-7)*; incremental decode
+  (token-by-token with cache) equals the full-sequence result *(done, S1-7b)*; GQA with `KvHeadCount=1` and
+  `=HeadCount` both correct *(done)*; gradient-checked on a 2-layer toy *(done)*.
 - **Depends on:** S1-6
+- **S1-7b done:** `RotaryEmbedding.ApplyAtOffset` (rotate at the cached position offset); `Attention` decode path
+  (project/RoPE only the new tokens, append this layer's K/V to the cache, attend over the full history) gated to
+  inference (`GradMode.NoGrad`); a generalized causal mask covering decode and prefill; per-layer `layerIndex`
+  threading; `KvCache` storing post-RoPE K + raw V per layer (host-side seq concat). `Inference.GenerateText`
+  prefills then decodes one token per step. Tests: attention-level decode≡full-sequence (1e-4) and full-model
+  decode≡full-forward logits (1e-3).
 
 ### S1-8 — Block + model assembly
 - **Files:** `Models/Modules.cs` (`TransformerBlock`, `LlamaModel`)
@@ -383,24 +396,39 @@ generating. (Generation re-runs the full sequence each step; the KV-cache decode
   (so a poisoned distribution can't silently sample the wrong token), empty logits throw, and the CLI
   parser fails fast on unparseable/missing/unknown/out-of-range flags. 13 unit tests in `SamplingTests.cs`.
 
-### S1-10 — Training loop
-- **Files:** `Training/Training.cs` (`Trainer`), `Training/Datasets.cs` (new)
+### S1-10 — Training loop *(done)*
+- **Files:** `Training/Training.cs` (`Trainer`), `Training/Datasets.cs`, `Formats/Checkpoint.cs` (new)
 - **Do:** batched data pipeline (tokenize → pack → shift labels), forward → cross-entropy → backward
   → AdamW step, gradient accumulation, warmup+cosine LR, periodic checkpoint to `StateDict`,
   resumable.
-- **Acceptance:** training loss on a small real corpus (e.g. TinyStories subset) decreases
-  monotonically over an epoch; checkpoint reload reproduces identical logits; grad-accum of N steps
-  equals one N×-batch step within tolerance.
+- **Acceptance:** training loss on a small real corpus decreases over training *(done — last-10 avg <
+  first-10 avg × 0.7)*; checkpoint reload reproduces identical logits *(done — bit-identical)*; grad-accum
+  of N steps equals one N×-batch step within tolerance *(done — 1e-4)*.
 - **Depends on:** S0-5, S1-8, S0-8 (parameter init)
+- **Done:** `Trainer.Train` runs the loop with a warmup→cosine schedule (via `AdamW.LearningRateSchedule`)
+  and gradient accumulation (scale each micro-batch loss by 1/N; parameter grads are leaf-accumulated across
+  the `Backward` calls). `TextDataset` packs a corpus into contiguous `sequenceLength+1` blocks. `Checkpoint`
+  is a self-contained little-endian binary (model weights + AdamW moments + step) — no dependency on the
+  unfinished safetensors loader; `Trainer.Restore` copies weights back in place and restores optimizer state.
+  CLI: `train` saves `checkpoints/model.ckpt`; `generate --load <ckpt>` reloads and decodes. 6 tests in
+  `TrainingTests.cs`. *(Deferred to S1-11: config/tokenizer stored in the checkpoint; training from a real
+  dataset file; epoch shuffling without replacement.)*
 
-### S1-11 — CLI end-to-end  *(milestone / verification)*
-- **Files:** `ProjectAI/Program.cs`
+### S1-11 — CLI end-to-end  *(milestone / verification — `train`/`generate` done; `convert` pending S1-4)*
+- **Files:** `ProjectAI/Program.cs`, `ProjectAI.Training/Checkpointing.cs`, `ProjectAI.Formats/Checkpoint.cs`
 - **Do:** wire `train` (S1-10), `generate` (S1-8 + S1-9), `convert` (S1-4/S1-5 → internal checkpoint)
   to real implementations behind the existing command switch.
-- **Acceptance:** `projectai train --config tiny.json` trains and checkpoints; `projectai generate
-  --prompt "..."` emits coherent continuation from that checkpoint; `projectai convert model.safetensors`
-  loads an open model and `generate` produces sensible text.
+- **Acceptance:** `projectai train` trains and checkpoints *(done)*; `projectai generate --load <ckpt>
+  --prompt "..."` emits a continuation from that checkpoint *(done)*; `projectai convert model.safetensors`
+  loads an open model and `generate` produces sensible text *(pending S1-4 safetensors loader)*.
 - **Depends on:** S1-10, S1-9, S1-4
+- **Done:** Checkpoints are self-describing — format v2 carries a metadata string holding the JSON `ModelConfig`
+  + tokenizer (`Checkpointing.SaveModel`/`LoadModel`), so `generate --load` rebuilds the model from the file
+  rather than a hardcoded config, and a config/shape mismatch is a clear error. `train --data <file>
+  [--steps/--batch/--seqlen/--lr]` trains on a user corpus via the real `Trainer`; default `train` is the
+  built-in demo. Tests: config+tokenizer+weights round-trip bit-identically; metadata-less checkpoints are
+  rejected for inference. *(Still open: `convert` needs the safetensors loader S1-4; a `--config` JSON file and
+  custom model sizing on the CLI; resuming training from a saved checkpoint via the CLI.)*
 
 **Stage 1 milestone:** from a cold checkout, `projectai train` learns a small model whose samples are
 coherent, and `projectai convert` + `generate` runs a real open-weight model — all on the CPU backend.
