@@ -8,6 +8,7 @@ public partial class TurnCard : VBoxContainer
 {
     private Label _promptBody;
     private Label _response;
+    private Label _note;
     private Spinner _spinner;
     private bool _streamed;
 
@@ -15,7 +16,7 @@ public partial class TurnCard : VBoxContainer
     {
         AddThemeConstantOverride("separation", 6);
         AddChild(Card("You", prompt, Palette.UserBubble, Palette.Text, out _promptBody));
-        AddChild(ResponseCard(out _response, out _spinner));
+        AddChild(ResponseCard(out _response, out _note, out _spinner));
         SetFontSize(fontSize);
     }
 
@@ -47,15 +48,33 @@ public partial class TurnCard : VBoxContainer
         _response.Text += delta;
     }
 
-    /// <summary>Marks a streamed turn finished; shows a placeholder if the model produced nothing.</summary>
-    public void Complete()
+    /// <summary>
+    /// Marks a streamed turn finished, annotating why it ended (<paramref name="stop"/>). A natural finish
+    /// (eos / im_end / a hit length cap) shows nothing extra; a cancel or a context-limit stop adds a small muted
+    /// footer; and a turn that produced no text explains the blank instead of a bare "(empty response)".
+    /// </summary>
+    public void Complete(string stop)
     {
         StopSpinner();
         if (!_streamed)
         {
-            _response.Text = "(empty response)";
+            _response.Text = stop switch
+            {
+                "context_full" => "Context window full — start a New chat to continue.",
+                "canceled" => "Stopped before any output.",
+                _ => "(empty response)",
+            };
             _response.AddThemeColorOverride("font_color", Palette.Muted);
+            return;
         }
+
+        string note = stop switch
+        {
+            "canceled" => "⏹ Stopped",
+            "context" => "Reached the context limit — start a New chat to continue.",
+            _ => "", // eos / im_end / maxTokens → a natural end, no footer
+        };
+        if (note.Length > 0) { _note.Text = note; _note.Visible = true; }
     }
 
     private void StopSpinner()
@@ -64,7 +83,7 @@ public partial class TurnCard : VBoxContainer
     }
 
     // The model's response card: caption over a [spinner + body] row, so the spinner sits inline with "Generating…".
-    private static PanelContainer ResponseCard(out Label body, out Spinner spinner)
+    private static PanelContainer ResponseCard(out Label body, out Label note, out Spinner spinner)
     {
         var panel = new PanelContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
         Palette.StylePanel(panel, Palette.PanelBg, radius: 10, pad: 12);
@@ -86,6 +105,11 @@ public partial class TurnCard : VBoxContainer
         body.AddThemeColorOverride("font_color", Palette.Muted);
         row.AddChild(body);
         column.AddChild(row);
+
+        // A small muted footer for the stop reason (stopped / context limit); hidden on a natural finish.
+        note = Palette.Heading("", 11, Palette.Muted);
+        note.Visible = false;
+        column.AddChild(note);
 
         panel.AddChild(column);
         return panel;

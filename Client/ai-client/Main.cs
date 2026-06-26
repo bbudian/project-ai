@@ -43,7 +43,7 @@ public partial class Main : Control
 
         _api.HealthReceived += OnHealth;
         _chat.Token += delta => { _activeTurn?.Append(delta); _transcript.ScrollToBottom(); };
-        _chat.Done += _ => OnChatDone();
+        _chat.Done += OnChatDone;
         _chat.ChatError += OnChatError;
         _chat.Closed += OnChatClosed;
         _api.TrainStarted += OnTrainStarted;
@@ -170,9 +170,9 @@ public partial class Main : Control
         if (_chatBusy) _chat.Cancel();
     }
 
-    private void OnChatDone()
+    private void OnChatDone(string stop)
     {
-        _activeTurn?.Complete();
+        _activeTurn?.Complete(stop);
         _transcript.ScrollToBottom();
         _activeTurn = null;
         _chatBusy = false;
