@@ -9,11 +9,12 @@ using Godot;
 // transport-agnostic. One persistent connection keeps the server's KV cache warm across turns (Phase 1 of live chat).
 public partial class ChatSocket : Node
 {
-    public event Action SessionReady;      // server accepted the session (start handled)
-    public event Action<string> Token;     // a streamed text delta
-    public event Action<string> Done;      // a turn finished (arg = stop reason)
-    public event Action<string> ChatError; // server-reported or transport error
-    public event Action Closed;            // the connection dropped/closed
+    public event Action SessionReady;          // server accepted the session (start handled)
+    public event Action<string> Token;         // a streamed text delta
+    public event Action<string> Done;          // a turn finished (arg = stop reason)
+    public event Action<SourceLink[]> Sources; // web-research sources for the turn (arrives before the tokens)
+    public event Action<string> ChatError;     // server-reported or transport error
+    public event Action Closed;                // the connection dropped/closed
 
     private readonly WebSocketPeer _peer = new();
     private readonly Queue<string> _outbox = new();
@@ -45,7 +46,7 @@ public partial class ChatSocket : Node
     {
         var d = new Godot.Collections.Dictionary
         {
-            { "type", "message" }, { "text", r.Prompt }, { "maxTokens", r.MaxTokens }, { "sample", r.Sample },
+            { "type", "message" }, { "text", r.Prompt }, { "maxTokens", r.MaxTokens }, { "sample", r.Sample }, { "research", r.Research },
         };
         if (r.Sample) { d["temperature"] = r.Temperature; d["topK"] = r.TopK; d["topP"] = r.TopP; d["seed"] = 0; }
         Enqueue(d);
@@ -98,9 +99,23 @@ public partial class ChatSocket : Node
         {
             case "ready": SessionReady?.Invoke(); break;
             case "token": Token?.Invoke(d.Str("text")); break;
+            case "sources": Sources?.Invoke(ParseSources(d)); break;
             case "done": Done?.Invoke(d.Str("stop")); break;
             case "error": ChatError?.Invoke(d.Str("error", "chat error")); break;
         }
+    }
+
+    private static SourceLink[] ParseSources(Godot.Collections.Dictionary d)
+    {
+        if (!d.ContainsKey("items")) return [];
+        var arr = d["items"].AsGodotArray();
+        var sources = new SourceLink[arr.Count];
+        for (int i = 0; i < arr.Count; i++)
+        {
+            var item = arr[i].AsGodotDictionary();
+            sources[i] = new SourceLink(item.Str("title"), item.Str("url"));
+        }
+        return sources;
     }
 
     private static string ToWsUrl(string baseUrl)

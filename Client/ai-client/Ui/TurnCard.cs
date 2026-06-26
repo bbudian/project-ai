@@ -9,6 +9,7 @@ public partial class TurnCard : VBoxContainer
     private Label _promptBody;
     private Label _response;
     private Label _note;
+    private VBoxContainer _sources;
     private Spinner _spinner;
     private bool _streamed;
 
@@ -16,8 +17,31 @@ public partial class TurnCard : VBoxContainer
     {
         AddThemeConstantOverride("separation", 6);
         AddChild(Card("You", prompt, Palette.UserBubble, Palette.Text, out _promptBody));
-        AddChild(ResponseCard(out _response, out _note, out _spinner));
+        AddChild(ResponseCard(out _response, out _note, out _sources, out _spinner));
         SetFontSize(fontSize);
+    }
+
+    /// <summary>Shows the web sources the answer was grounded in (web-research mode) as clickable citations.</summary>
+    public void SetSources(SourceLink[] sources)
+    {
+        if (sources is null || sources.Length == 0) return;
+        foreach (var child in _sources.GetChildren()) child.QueueFree();
+        _sources.AddChild(Palette.Heading("Sources", 11, Palette.Muted));
+        for (int i = 0; i < sources.Length; i++)
+        {
+            var s = sources[i];
+            var link = new LinkButton
+            {
+                Text = $"[{i + 1}] {(s.Title.Length > 70 ? s.Title[..70] + "…" : s.Title)}",
+                TooltipText = s.Url,
+                SizeFlagsHorizontal = SizeFlags.ShrinkBegin,
+            };
+            link.AddThemeColorOverride("font_color", Palette.Accent);
+            link.AddThemeColorOverride("font_hover_color", Palette.Accent);
+            link.Pressed += () => OS.ShellOpen(s.Url); // open the source in the user's browser
+            _sources.AddChild(link);
+        }
+        _sources.Visible = true;
     }
 
     /// <summary>Resizes the conversation text (both bubbles) live; the captions stay fixed.</summary>
@@ -83,7 +107,7 @@ public partial class TurnCard : VBoxContainer
     }
 
     // The model's response card: caption over a [spinner + body] row, so the spinner sits inline with "Generating…".
-    private static PanelContainer ResponseCard(out Label body, out Label note, out Spinner spinner)
+    private static PanelContainer ResponseCard(out Label body, out Label note, out VBoxContainer sources, out Spinner spinner)
     {
         var panel = new PanelContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
         Palette.StylePanel(panel, Palette.PanelBg, radius: 10, pad: 12);
@@ -105,6 +129,11 @@ public partial class TurnCard : VBoxContainer
         body.AddThemeColorOverride("font_color", Palette.Muted);
         row.AddChild(body);
         column.AddChild(row);
+
+        // Web-research citations (web mode); populated by SetSources, hidden otherwise.
+        sources = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill, Visible = false };
+        sources.AddThemeConstantOverride("separation", 2);
+        column.AddChild(sources);
 
         // A small muted footer for the stop reason (stopped / context limit); hidden on a natural finish.
         note = Palette.Heading("", 11, Palette.Muted);

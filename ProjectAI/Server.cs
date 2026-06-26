@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using ProjectAI.Core;
 using ProjectAI.Models;
+using ProjectAI.Research;
 using ProjectAI.Training;
 
 // A minimal local HTTP API for the UI client. Serves generation from a directory of checkpoint models (the UI's
@@ -16,9 +17,14 @@ using ProjectAI.Training;
 internal static class Server
 {
     private sealed record GenerateRequest(
-        string? Prompt, string? Model, string? Backend, int? MaxTokens, float? Temperature, int? TopK, float? TopP, ulong? Seed);
+        string? Prompt, string? Model, string? Backend, int? MaxTokens, float? Temperature, int? TopK, float? TopP, ulong? Seed,
+        bool? Research, int? ResearchResults);
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
+
+    // Web research (RAG): fetch current web results and ground the prompt in them. Tavily behind the ISearchProvider
+    // seam (reads TAVILY_API_KEY); swap the provider here to change search backends.
+    private static readonly WebResearcher Researcher = new(new TavilySearchProvider());
 
     public static void Run(IComputeBackend defaultBackend, string defaultBackendId, string modelsDirectory, string defaultModel, int port)
     {
@@ -186,6 +192,26 @@ internal static class Server
             WriteJson(res, 400, new { error = $"backend '{backendId}' is not available on this machine (see GET /health)" });
             return;
         }
+
+        // Optional web research (RAG): fetch current results and ground the prompt in them BEFORE taking the
+        // inference lock, so the (network) search doesn't block other requests. Sources are returned for citation.
+        string prompt = gr.Prompt;
+        object? sources = null;
+        if (gr.Research == true)
+        {
+            if (!Researcher.Provider.IsConfigured) { WriteJson(res, 400, new { error = $"web research unavailable: {Researcher.Provider.Unavailable}" }); return; }
+            try
+            {
+                var rsw = System.Diagnostics.Stopwatch.StartNew();
+                var rr = Researcher.ResearchAsync(gr.Prompt, gr.ResearchResults ?? 5).GetAwaiter().GetResult();
+                rsw.Stop();
+                prompt = rr.AugmentedPrompt;
+                sources = rr.Sources.Select(s => new { title = s.Title, url = s.Url });
+                Console.WriteLine($"  research: \"{Trunc(gr.Prompt)}\" → {rr.Sources.Count} sources in {rsw.Elapsed.TotalSeconds:0.00}s ({Researcher.Provider.Name})");
+            }
+            catch (Exception ex) { WriteJson(res, 502, new { error = $"web research failed: {ex.Message}" }); return; }
+        }
+
         // Everything below touches the model cache and runs the forward pass, so it is serialized: a second
         // /generate (e.g. from a reopened client while an abandoned one is still finishing) waits here instead of
         // corrupting shared state — while /health etc. stay responsive because they never take this lock.
@@ -219,7 +245,7 @@ internal static class Server
             Console.WriteLine($"  generate: model={loaded.Name} backend={backendId} {decoding} maxTokens={maxTokens} prompt=\"{Trunc(gr.Prompt)}\"");
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var gen = Inference.GenerateText(backend, loaded.Model, loaded.Tokenizer, loaded.Config, gr.Prompt, sampler, maxTokens);
+            var gen = Inference.GenerateText(backend, loaded.Model, loaded.Tokenizer, loaded.Config, prompt, sampler, maxTokens);
             sw.Stop();
             double secs = sw.Elapsed.TotalSeconds;
             double tps = gen.GeneratedTokens / Math.Max(0.001, secs);
@@ -239,6 +265,7 @@ internal static class Server
                 generatedTokens = gen.GeneratedTokens,
                 stop = gen.StopReason,
                 seconds = Math.Round(secs, 3),
+                sources,
             });
         }
     }
@@ -344,7 +371,8 @@ internal static class Server
 
     private sealed record ChatIn(
         string? Type, string? Model, string? Backend, string? Text,
-        bool? Sample, float? Temperature, int? TopK, float? TopP, int? MaxTokens, ulong? Seed);
+        bool? Sample, float? Temperature, int? TopK, float? TopP, int? MaxTokens, ulong? Seed,
+        bool? Research, int? ResearchResults);
 
     // Accepts a /chat WebSocket and runs a stateful streaming session (Phase 1 of live chat): a persistent warm KV
     // cache, each new user message ingested incrementally, and the assistant reply streamed token-by-token. The
@@ -442,12 +470,31 @@ internal static class Server
         // is an explicit cap, clamped to the context window (Turn stops there anyway).
         int maxTokens = m.MaxTokens is > 0 ? Math.Min(m.MaxTokens.Value, session.ContextLimit) : session.ContextLimit;
 
+        // Optional web research (RAG), done before the inference lock (it's network I/O): fetch current results, ground
+        // the user's message in them, and stream the sources to the client for citation.
+        string text = m.Text ?? "";
+        if (m.Research == true)
+        {
+            if (!Researcher.Provider.IsConfigured) { send(new { type = "error", error = $"web research unavailable: {Researcher.Provider.Unavailable}" }); return; }
+            try
+            {
+                var rsw = System.Diagnostics.Stopwatch.StartNew();
+                var rr = Researcher.ResearchAsync(m.Text ?? "", m.ResearchResults ?? 5, cancel).GetAwaiter().GetResult();
+                rsw.Stop();
+                text = rr.AugmentedPrompt;
+                send(new { type = "sources", items = rr.Sources.Select(s => new { title = s.Title, url = s.Url }) });
+                Console.WriteLine($"  ⇄ chat research: {rr.Sources.Count} sources in {rsw.Elapsed.TotalSeconds:0.00}s ({Researcher.Provider.Name})");
+            }
+            catch (OperationCanceledException) { send(new { type = "done", stop = "canceled", generatedTokens = 0 }); return; }
+            catch (Exception ex) { send(new { type = "error", error = $"web research failed: {ex.Message}" }); return; }
+        }
+
         try
         {
             lock (InferenceLock)
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
-                var r = session.Turn(m.Text ?? "", sampler, maxTokens, cancel, delta => send(new { type = "token", text = delta }));
+                var r = session.Turn(text, sampler, maxTokens, cancel, delta => send(new { type = "token", text = delta }));
                 sw.Stop();
                 send(new
                 {

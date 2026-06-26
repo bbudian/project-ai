@@ -16,8 +16,11 @@ public interface IApiClient
     event Action<TrainStatus> TrainStatusReceived;
 }
 
-/// <summary>One generation request: the prompt, the chosen model and compute backend (empty = server default), and decoding settings. Carried over the chat WebSocket (the old REST /generate result type was retired in favor of streaming).</summary>
-public sealed record GenerateRequest(string Prompt, string Model, string Backend, bool Sample, float Temperature, int TopK, float TopP, int MaxTokens);
+/// <summary>One generation request: the prompt, the chosen model and compute backend (empty = server default), decoding settings, and whether to ground the answer in a live web search (RAG). Carried over the chat WebSocket (the old REST /generate result type was retired in favor of streaming).</summary>
+public sealed record GenerateRequest(string Prompt, string Model, string Backend, bool Sample, float Temperature, int TopK, float TopP, int MaxTokens, bool Research);
+
+/// <summary>A web source the model was grounded in (web-research mode): a title and its URL, shown as a citation under the reply.</summary>
+public sealed record SourceLink(string Title, string Url);
 
 /// <summary>A compute backend the server offers (the CPU/GPU picker). <see cref="Available"/> is false when its runtime/device isn't present, with the reason in <see cref="Reason"/>.</summary>
 public sealed record BackendOption(string Id, string Label, bool Available, string Reason);

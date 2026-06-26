@@ -43,6 +43,7 @@ public partial class Main : Control
 
         _api.HealthReceived += OnHealth;
         _chat.Token += delta => { _activeTurn?.Append(delta); _transcript.ScrollToBottom(); };
+        _chat.Sources += sources => { _activeTurn?.SetSources(sources); _transcript.ScrollToBottom(); };
         _chat.Done += OnChatDone;
         _chat.ChatError += OnChatError;
         _chat.Closed += OnChatClosed;

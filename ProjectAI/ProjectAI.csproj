@@ -13,6 +13,7 @@
     <ProjectReference Include="..\ProjectAI.Formats\ProjectAI.Formats.csproj" />
     <ProjectReference Include="..\ProjectAI.Models\ProjectAI.Models.csproj" />
     <ProjectReference Include="..\ProjectAI.Training\ProjectAI.Training.csproj" />
+    <ProjectReference Include="..\ProjectAI.Research\ProjectAI.Research.csproj" />
   </ItemGroup>
 
 </Project>

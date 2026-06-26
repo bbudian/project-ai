@@ -25,6 +25,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "ProjectAI.Tests", "ProjectA
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProjectAI.Trainer", "ProjectAI.Trainer\ProjectAI.Trainer.csproj", "{4E7763F7-32FC-41D2-8342-CA8225E7712C}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProjectAI.Research", "ProjectAI.Research\ProjectAI.Research.csproj", "{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -167,6 +169,18 @@ Global
 		{4E7763F7-32FC-41D2-8342-CA8225E7712C}.Release|x64.Build.0 = Release|Any CPU
 		{4E7763F7-32FC-41D2-8342-CA8225E7712C}.Release|x86.ActiveCfg = Release|Any CPU
 		{4E7763F7-32FC-41D2-8342-CA8225E7712C}.Release|x86.Build.0 = Release|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Debug|x64.Build.0 = Debug|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Debug|x86.Build.0 = Debug|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Release|x64.ActiveCfg = Release|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Release|x64.Build.0 = Release|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Release|x86.ActiveCfg = Release|Any CPU
+		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

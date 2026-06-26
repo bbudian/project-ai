@@ -19,7 +19,7 @@ public partial class Composer : PanelContainer
     private PopupPanel _settingsPopup;
     private OptionButton _model;
     private BackendPicker _backend;
-    private CheckButton _sample, _capLength;
+    private CheckButton _sample, _capLength, _research;
     private SpinBox _temperature, _topK, _topP, _maxTokens;
 
     public override void _Ready()
@@ -103,6 +103,14 @@ public partial class Composer : PanelContainer
         _capLength.Toggled += OnCapToggled;
         col.AddChild(_capLength);
         _maxTokens = Param(col, "Max tokens", 1, 8192, 1, 1024);
+
+        col.AddChild(new HSeparator());
+        col.AddChild(Palette.Heading("Web research", 12, Palette.Muted));
+        // When on, the server runs a live web search for the prompt and grounds the answer in the results (RAG),
+        // returning the sources for citation. Needs TAVILY_API_KEY set on the server, else the turn errors clearly.
+        _research = new CheckButton { Text = "🌐  Search the web and answer from current results" };
+        _research.AddThemeColorOverride("font_color", Palette.Text);
+        col.AddChild(_research);
 
         col.AddChild(new HSeparator());
         col.AddChild(Palette.Heading("Appearance", 12, Palette.Muted));
@@ -208,7 +216,8 @@ public partial class Composer : PanelContainer
             (float)_temperature.Value,
             (int)_topK.Value,
             (float)_topP.Value,
-            _capLength.ButtonPressed ? (int)_maxTokens.Value : 0)); // 0 = dynamic (until the model stops / context fills)
+            _capLength.ButtonPressed ? (int)_maxTokens.Value : 0, // 0 = dynamic (until the model stops / context fills)
+            _research.ButtonPressed));
         _prompt.Text = ""; // clear the input for the next message (the request already captured the text)
     }
 
