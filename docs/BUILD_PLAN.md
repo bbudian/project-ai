@@ -341,12 +341,20 @@ generating. (Generation re-runs the full sequence each step; the KV-cache decode
   bit-exact, F16/BF16 casts, metadata skip, 7 malformed-file rejections). *(Mapping HF tensor names onto a
   `LlamaModel` + the `convert` CLI remains for S1-11/follow-up; GGUF is S1-5.)*
 
-### S1-5 — GGUF loader
-- **Files:** `Formats/Loaders.cs` (`GgufLoader`)
+### S1-5 — GGUF loader  *(float path done; quant + config-mapping open)*
+- **Files:** `Formats/Loaders.cs` (`GgufLoader`, `GgufFile`)
 - **Do:** parse GGUF metadata + tensor table; support F32/F16 first, then common quant blocks
   (Q8_0, Q4_K) with dequant to F32 on load.
-- **Acceptance:** reads a llama.cpp GGUF; metadata (arch, hyperparams) parsed into a `ModelConfig`;
-  dequantized Q4_K tensor matches llama.cpp dequant within tolerance.
+- **Done:** `GgufLoader` parses GGUF v2/v3 defensively (magic/version, the typed metadata KV table incl.
+  arrays, tensor descriptors, aligned data section) and materializes F32/F16/BF16 tensors to F32, reversing
+  GGUF's innermost-first `ne[]` dims to our row-major `Shape` (byte layout already matches, so no transpose).
+  Counts/lengths are capped and every tensor span is bounds-checked against the file, mirroring
+  `SafetensorsLoader`. `LoadFile` also returns the parsed metadata (`GgufFile`) for a future GGUF→`ModelConfig`
+  convert path. Tested against synthetic GGUF v3 files (float load + dim reversal + metadata typing; quantized /
+  bad-magic / unsupported-version all rejected with clear errors).
+- **Still open:** quantized block dequant (Q8_0/Q4_K/…) is **deferred to S3-3** (the loader rejects them with a
+  clear, type-named error today); mapping GGUF metadata → `ModelConfig` + GGUF tensor names → our params (the
+  GGUF analog of `Converter`) so a real llama.cpp GGUF runs end-to-end.
 - **Depends on:** S0-2
 
 ### S1-6 — Norm / RoPE / SwiGLU modules
@@ -438,12 +446,28 @@ coherent, and `projectai convert` + `generate` runs a real open-weight model —
 
 Goal: run the *exact same* models on CUDA (4090) and Metal (M4), validated against the CPU oracle.
 
-- **S2-1 — Backend conformance suite.** Parameterized tests that run every op on each backend and
-  assert equality with `Backends.Cpu` within tolerance. *This is the safety net for everything below.*
-- **S2-2 — TorchSharp backend.** Implement `IComputeBackend` over libtorch tensors; map our `DType`/
-  `Device`; CUDA on Windows, MPS on macOS. Fastest route to GPU training.
-- **S2-3 — Device memory & lifetime.** Pooled allocation, explicit transfer, dispose discipline,
-  stream/queue handling.
+- **S2-1 — Backend conformance suite. ✅ Done.** `ProjectAI.Tests/BackendConformanceTests.cs` runs every
+  `IComputeBackend` op (elementwise+broadcast, MatMul incl. batched/transposeB, axis reductions, Softmax/RmsNorm/
+  Silu/RoPE, Gather/ScatterAddRows/CrossEntropy+grad) on each candidate backend via deterministic inputs and
+  asserts a match to the `Backends.Cpu` oracle within an atol/rtol of 1e-4. Backends register in a single
+  `BackendFactories` array — adding Torch/Vulkan is one entry and all 30 op-cases (incl. transposed, sliced-offset,
+  stride-0-broadcast, and GQA batch-broadcast views) check it with no new test code. *Safety net for everything below.*
+- **S2-2 — TorchSharp backend. ✅ Done.** `ProjectAI.Backends.Torch/TorchComputeBackend.cs` implements
+  `IComputeBackend` over libtorch (CUDA/Windows, MPS/Mac, CPU anywhere). The bridge: `Tensor.Handle` holds a
+  *contiguous* base torch tensor, and every op reconstructs our logical (possibly strided/broadcast) view via
+  `as_strided(shape, strides, offset)` — so libtorch's own striding/broadcasting is reused and results stay
+  bit-comparable to the oracle. `DType`/`DeviceKind` map to torch `ScalarType`/`DeviceType`. Verified: all 26
+  S2-1 ops pass against the CPU oracle on real libtorch-cpu (`TorchConformanceTests`, skipped when no native
+  bundle is installed), and `demo --backend torch` trains y=Wx+b to ~0 loss through the full autograd+AdamW path.
+  Managed TorchSharp is referenced (builds everywhere); the native bundle (`TorchSharp-cuda-windows` / `libtorch-cpu`)
+  is opt-in per machine. CLI selects the backend at the composition root: `--backend cpu|torch [--device cpu|cuda|metal]`
+  (the start of S2-6). Each op runs in a `DisposeScope` so views/intermediates are freed deterministically (an
+  adversarial review confirmed the original no-scope version leaked thousands of native tensors per step). *Open for
+  S2-3: the live-graph result tensors are still GC-finalized between steps — deterministic handle lifetime + pooling.*
+- **S2-3 — Device memory & lifetime.** *(per-step scoping done)* `IComputeBackend.BeginScope()`/`KeepAlive()`
+  (Torch → libtorch `DisposeScope`); the trainer + AdamW scope each step so its activation graph frees on the GPU
+  before the next allocates (a 47M model now trains at batch 16 where it OOMed). Remaining: pooled allocation and
+  single-pass peak reduction (the latter overlaps S3-2 gradient checkpointing).
 - **S2-4 — SPIR-V build pipeline.** GLSL/HLSL compute → SPIR-V at build time; shader hot-reload for
   dev; Silk.NET device/queue/descriptor plumbing.
 - **S2-5 — Vulkan compute kernels.** Hand-written GEMM, fused attention, norms, elementwise, RoPE;
@@ -457,8 +481,13 @@ Exit: conformance suite green on all backends; ≥10× training throughput vs CP
 
 Goal: make larger open models trainable/fine-tunable on one 4090 and runnable quantized.
 
-- **S3-1 — BF16 / mixed precision** (master weights F32, compute BF16) + loss scaling.
-- **S3-2 — Gradient checkpointing** (recompute activations to trade compute for memory).
+- **S3-1 — BF16 / mixed precision** (master weights F32, compute BF16) + loss scaling. *(The lever for big models:
+  large's ~3.3GB F32+AdamW resident state, not activations, is what keeps it off an 8GB GPU.)*
+- **S3-2 — Gradient checkpointing** *(done)*. `Autograd.Checkpoint(segment, input, params)` recomputes each block's
+  activations in backward (detached-input recompute + a `Σ(out⊙upstream)` surrogate scalar), in a nested scope freed
+  per block → peak activation memory ≈ one block. Plus `IComputeBackend.Release` to free superseded AdamW
+  moments/grads deterministically (the real churn-driven OOM). Bit-exact gradient-check on CPU + libtorch; `medium`
+  trains at batch 64 (OOMs without). Wired via `LlamaModel.GradientCheckpointing` (trainer `--checkpoint`, auto for `large`).
 - **S3-3 — Quantization** for inference: Q8/Q4 (GGUF-compatible) with dequant-on-use kernels.
 - **S3-4 — PagedAttention KV cache** (block table) for long-context, multi-request decode.
 - **S3-5 — LoRA / fine-tuning** adapters — the realistic path to multi-B models on a 4090.

@@ -13,6 +13,8 @@ public sealed record TrainingConfig
     public float WeightDecay { get; init; } = 0.01f;
     public int MaxSteps { get; init; } = 1_000;
     public int GradientAccumulationSteps { get; init; } = 1;
+    /// <summary>Recompute each transformer block's activations in backward instead of storing them (S3-2): less peak memory, ~one extra forward per block.</summary>
+    public bool GradientCheckpointing { get; init; }
     public int WarmupSteps { get; init; } = 100;
     /// <summary>Seed for batch sampling, so a run is reproducible.</summary>
     public ulong Seed { get; init; }
@@ -62,6 +64,7 @@ public sealed class Trainer(IComputeBackend backend) : ITrainer
         if (dataset.Count == 0) throw new ArgumentException("dataset is empty.", nameof(dataset));
 
         var ag = new Autograd(Backend);
+        model.GradientCheckpointing = config.GradientCheckpointing; // S3-2: trade recompute for activation memory
         var parameters = model.Parameters().ToList();
         var optimizer = new AdamW(parameters, Backend, learningRate: config.LearningRate, weightDecay: config.WeightDecay)
         {
@@ -87,6 +90,10 @@ public sealed class Trainer(IComputeBackend backend) : ITrainer
             float stepLoss = 0f;
             for (int micro = 0; micro < microSteps; micro++)
             {
+                // Scope the forward+backward so this micro-batch's activation graph is freed deterministically at
+                // the end (S2-3) — before the optimizer (or the next micro-batch) allocates — instead of lingering
+                // until the GC runs. Only the accumulated leaf gradients are kept alive past the scope.
+                using var scope = Backend.BeginScope();
                 var (input, target) = NextBatch(dataset, config, rng);
                 var logits = model.Forward(input);
                 var loss = Loss.CrossEntropy(ag, logits, target);
@@ -96,6 +103,9 @@ public sealed class Trainer(IComputeBackend backend) : ITrainer
 
                 var scaled = microSteps > 1 ? ag.Mul(loss, invMicro) : loss; // mean over all micro-batches
                 scaled.Backward();
+
+                foreach (var p in parameters)
+                    if (p.Grad is { } g) Backend.KeepAlive(g);
             }
             optimizer.Step();
             losses.Add(stepLoss);

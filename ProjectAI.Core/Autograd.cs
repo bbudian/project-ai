@@ -88,6 +88,75 @@ public sealed class Autograd(IComputeBackend backend)
         return Record(dst, "contiguous", [x], g => [g]);
     }
 
+    /// <summary>Sum over all elements, producing a scalar. Backward: grad_x = g (the scalar) broadcast to x.</summary>
+    public Tensor SumAll(Tensor x)
+    {
+        var y = x;
+        for (int axis = x.Shape.Rank - 1; axis >= 0; axis--) y = Backend.Sum(y, axis); // → scalar; strided-safe
+        return Record(y, "sum_all", [x], g =>
+            [Backend.AddScalar(Backend.Allocate(x.Shape, x.DType), ToScalar(g))]); // d(sum)/d(x_i) = 1, so fill with g
+    }
+
+    /// <summary>
+    /// Gradient checkpointing (ticket S3-2). Runs <paramref name="segment"/> on <paramref name="input"/> WITHOUT
+    /// building a graph — so its intermediate activations are NOT retained — then records a node that RE-RUNS the
+    /// segment during backward to regenerate the graph on demand, trading a recompute for the activation memory.
+    /// <para>The backward recomputes from a detached copy of the input (so it doesn't extend the outer graph) with
+    /// grad forced on, then builds the surrogate scalar Σ(recomputed ⊙ upstream): its gradient w.r.t. the recomputed
+    /// output is exactly <c>upstream</c>, so a nested <see cref="Tensor.Backward"/> propagates that grad through the
+    /// local graph — yielding the input gradient and accumulating the segment's parameter gradients identically to
+    /// the non-checkpointed path (verified by a gradient-check test).</para>
+    /// <para>CALLER CONTRACT: this promotes the recomputed grads exactly ONE scope level (out of the recompute
+    /// scope into the caller's enclosing scope). When the caller runs <see cref="Tensor.Backward"/> inside its own
+    /// <see cref="IComputeBackend.BeginScope"/> — as the trainer does per micro-batch — it MUST, after Backward,
+    /// <see cref="IComputeBackend.KeepAlive"/> every model parameter's grad to promote it the rest of the way; the
+    /// trainer does this over the full parameter set. Backward with no enclosing scope needs nothing extra.</para>
+    /// <para>The whole recompute runs in its own <see cref="IComputeBackend.BeginScope"/> so the regenerated
+    /// activations are freed as soon as this segment's grads are extracted (only the input + the listed
+    /// <paramref name="parameters"/> gradients are kept) — without that, the per-step S2-3 scope would hold every
+    /// segment's recompute alive until the step ends, defeating the memory saving. <paramref name="parameters"/>
+    /// must list exactly the grad-requiring tensors the segment touches (e.g. <c>block.Parameters()</c>).</para>
+    /// </summary>
+    public Tensor Checkpoint(Func<Tensor, Tensor> segment, Tensor input, IReadOnlyList<Tensor> parameters)
+    {
+        Tensor output;
+        using (GradMode.NoGrad())
+        {
+            // Scope the forward too, so this segment's intermediate activations are freed immediately — only the
+            // (small) block output is kept. Without this, the no-grad forward still piles every block's activations
+            // into the enclosing per-step scope, and checkpointing saves nothing on the forward pass.
+            using var forwardScope = Backend.BeginScope();
+            output = segment(input);   // forward value only — no graph
+            Backend.KeepAlive(output); // the block output survives; its intermediates are freed at scope close
+        }
+
+        return Record(output, "checkpoint", [input], upstream =>
+        {
+            using var scope = Backend.BeginScope(); // free this segment's recompute as soon as its grads are out
+            var leaf = DetachLeaf(input);           // a fresh leaf with the input's values; its grad becomes grad-wrt-input
+            Tensor recomputed;
+            using (GradMode.Enabled()) recomputed = segment(leaf); // rebuild the local graph from the detached input
+
+            SumAll(Mul(recomputed, upstream)).Backward(); // seeds `recomputed` with `upstream`; fills leaf + param grads
+
+            var inputGrad = leaf.Grad ?? Backend.Allocate(input.Shape, input.DType);
+            Backend.KeepAlive(inputGrad);                                       // survives the recompute scope…
+            foreach (var p in parameters) if (p.Grad is not null) Backend.KeepAlive(p.Grad); // …as do this segment's param grads
+            return [inputGrad];
+        });
+    }
+
+    // A detached copy of x as a grad-requiring leaf (no GradFn), so recomputing a segment on it doesn't link back
+    // into the outer graph; the leaf's accumulated gradient is the gradient with respect to the original input.
+    private Tensor DetachLeaf(Tensor x)
+    {
+        var copy = Backend.Allocate(x.Shape, x.DType);
+        Backend.Copy(x, copy);
+        copy.Backend = Backend;
+        copy.RequiresGrad = true;
+        return copy;
+    }
+
     /// <summary>Mean over all elements, producing a scalar.</summary>
     public Tensor Mean(Tensor x)
     {

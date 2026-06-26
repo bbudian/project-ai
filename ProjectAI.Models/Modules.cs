@@ -37,10 +37,10 @@ public sealed class RotaryEmbedding : Module
         if (headDim % 2 != 0) throw new ArgumentException($"RoPE head dim must be even; got {headDim}.");
         HeadDim = headDim;
         _maxSeq = maxSequenceLength;
-        (_cos, _sin) = BuildTables(Backend, headDim, theta, maxSequenceLength);
+        (_cos, _sin) = BuildTables(Backend, headDim, theta, maxSequenceLength, Ctx.ComputeDType);
     }
 
-    private static (Tensor Cos, Tensor Sin) BuildTables(IComputeBackend backend, int headDim, float theta, int maxSeq)
+    private static (Tensor Cos, Tensor Sin) BuildTables(IComputeBackend backend, int headDim, float theta, int maxSeq, DType dtype)
     {
         int half = headDim / 2;
         var cos = new float[(long)maxSeq * headDim];
@@ -55,8 +55,8 @@ public sealed class RotaryEmbedding : Module
                 cos[p * headDim + j] = c; cos[p * headDim + j + half] = c;
                 sin[p * headDim + j] = s; sin[p * headDim + j + half] = s;
             }
-        return (backend.FromHost(cos, new Shape(maxSeq, headDim), DType.F32),
-                backend.FromHost(sin, new Shape(maxSeq, headDim), DType.F32));
+        return (backend.FromHost(cos, new Shape(maxSeq, headDim), dtype),
+                backend.FromHost(sin, new Shape(maxSeq, headDim), dtype));
     }
 
     /// <summary>Applies RoPE to <paramref name="x"/> (shape [.., seq, headDim]) at positions 0..seq-1.</summary>
@@ -136,7 +136,7 @@ public sealed class Attention : Module
         _wv = RegisterModule("wv", new Linear(ctx, dModel, kvh * dh));
         _wo = RegisterModule("wo", new Linear(ctx, h * dh, dModel));
         _rope = RegisterModule("rope", new RotaryEmbedding(ctx, dh, config.RopeTheta, config.MaxSequenceLength));
-        _invSqrtHeadDim = Backend.FromHost([1f / MathF.Sqrt(dh)], new Shape(1), DType.F32);
+        _invSqrtHeadDim = Backend.FromHost([1f / MathF.Sqrt(dh)], new Shape(1), Ctx.ComputeDType);
     }
 
     public override Tensor Forward(Tensor input, ForwardContext ctx)
@@ -174,12 +174,23 @@ public sealed class Attention : Module
         // 5. Scaled scores = (q/√dh) · kᵀ → [b,kvh,g,s,keyLen].
         var scores = Ag.MatMul(Ag.Mul(q5, _invSqrtHeadDim), k5, transposeB: true);
 
-        // 6. Causal mask + softmax over the key axis. An explicit per-batch mask [b,q,k] must have its batch
-        // axis aligned to scores' batch axis (axis 0), not right-broadcast onto the GQA group axis; insert
-        // size-1 head/group axes. A rank-2 mask broadcasts over all leading axes already.
-        var mask = ctx.AttentionMask ?? CausalMask(s, keyLen, posOffset);
-        if (mask.Shape.Rank == 3) mask = mask.Reshape(b, 1, 1, mask.Shape[1], mask.Shape[2]);
-        var probs = Ag.Softmax(Ag.Add(scores, mask), axis: -1); // [b,kvh,g,s,keyLen]
+        // 6. Causal mask + softmax over the key axis. A single new query (the decode step) sits at the end of the
+        // history and may attend ALL cached keys, so its causal mask is all-zero — skip building, uploading, and
+        // adding it on that per-token hot path.
+        Tensor probs;
+        if (ctx.AttentionMask is null && s == 1)
+        {
+            probs = Ag.Softmax(scores, axis: -1);
+        }
+        else
+        {
+            // An explicit per-batch mask [b,q,k] must have its batch axis aligned to scores' batch axis (axis 0),
+            // not right-broadcast onto the GQA group axis; insert size-1 head/group axes. A rank-2 mask broadcasts
+            // over all leading axes already.
+            var mask = ctx.AttentionMask ?? CausalMask(s, keyLen, posOffset);
+            if (mask.Shape.Rank == 3) mask = mask.Reshape(b, 1, 1, mask.Shape[1], mask.Shape[2]);
+            probs = Ag.Softmax(Ag.Add(scores, mask), axis: -1); // [b,kvh,g,s,keyLen]
+        }
 
         // 7. Context = probs · v → [b,kvh,g,s,dh].
         var context = Ag.MatMul(probs, v5);
@@ -203,7 +214,7 @@ public sealed class Attention : Module
         for (int i = 0; i < queryLen; i++)
             for (int j = 0; j < keyLen; j++)
                 m[i * keyLen + j] = j <= posOffset + i ? 0f : -1e9f;
-        return Backend.FromHost(m, new Shape(queryLen, keyLen), DType.F32);
+        return Backend.FromHost(m, new Shape(queryLen, keyLen), Ctx.ComputeDType);
     }
 }
 
@@ -256,11 +267,21 @@ public sealed class LlamaModel : Module
     public RmsNorm FinalNorm { get; }
     public IReadOnlyList<TransformerBlock> Blocks => _blocks;
 
+    /// <summary>
+    /// Gradient checkpointing (S3-2): when set, each transformer block's activations are recomputed in the
+    /// backward pass instead of stored — cutting training peak memory to roughly one block's worth at the cost of
+    /// one extra forward per block. A training-time toggle (the trainer sets it); ignored during inference.
+    /// </summary>
+    public bool GradientCheckpointing { get; set; }
+
     /// <summary>Maps token ids [batch, seq] (carried as floats) to logits [batch, seq, vocab].</summary>
     public override Tensor Forward(Tensor tokenIds, ForwardContext ctx)
     {
         var h = _embedding.Forward(tokenIds, ctx); // [batch, seq, dModel]
-        foreach (var block in _blocks) h = block.Forward(h, ctx);
+        foreach (var block in _blocks)
+            h = GradientCheckpointing && GradMode.IsEnabled
+                ? Ag.Checkpoint(x => block.Forward(x, ctx), h, block.Parameters().ToList()) // recompute in backward
+                : block.Forward(h, ctx);
         h = FinalNorm.Forward(h, ctx);
         return Ag.MatMul(h, _embedding.Weight, transposeB: true); // tied LM head → [batch, seq, vocab]
     }
@@ -326,34 +347,25 @@ public sealed class KvCache : IKvCache
         Array.Clear(_lengths);
     }
 
-    // Concatenates two [batch, kvHeads, *, headDim] tensors along the sequence axis (2). ToHost handles the
-    // (possibly strided) incoming view; the result is a fresh contiguous tensor.
+    // Concatenates the new K/V onto the cached history along the sequence axis (2).
+    //
+    // The first store (existing is null) materializes the possibly-strided incoming view into a fresh contiguous
+    // tensor via a host round-trip — but that happens only once per layer at prefill, off the per-token path, so
+    // its cost is negligible. Every subsequent (decode) append concatenates ON THE DEVICE via the backend.
+    //
+    // The previous implementation grew the cache host-side every step (download both → concat → re-upload), which
+    // forced a GPU↔host synchronization per layer per token. With 24 layers × (K and V) that is ~96 sync stalls
+    // per generated token, leaving the GPU mostly idle — the dominant cost of decode, not the model compute.
+    // The device-side concat removes those stalls entirely. (A pre-allocated paged buffer that writes in place,
+    // O(1) per token instead of this O(n) regrow, is the further optimization in ticket S3-4.)
     private Tensor ConcatSequence(Tensor? existing, Tensor incoming)
     {
         if (existing is null)
         {
             var copy = new float[incoming.ElementCount];
             _backend.ToHost(incoming, copy);
-            return _backend.FromHost(copy, incoming.Shape, DType.F32);
+            return _backend.FromHost(copy, incoming.Shape, incoming.DType); // preserve the model's precision (S3-1)
         }
-
-        int batch = existing.Shape[0], kvHeads = existing.Shape[1], headDim = existing.Shape[3];
-        int oldLen = existing.Shape[2], newLen = incoming.Shape[2];
-        int total = oldLen + newLen; // bounds already checked in Append
-
-        var oldHost = new float[existing.ElementCount];
-        var newHost = new float[incoming.ElementCount];
-        _backend.ToHost(existing, oldHost);
-        _backend.ToHost(incoming, newHost);
-
-        var combined = new float[(long)batch * kvHeads * total * headDim];
-        for (int bi = 0; bi < batch; bi++)
-            for (int hi = 0; hi < kvHeads; hi++)
-            {
-                int dst = ((bi * kvHeads + hi) * total) * headDim;
-                Array.Copy(oldHost, ((bi * kvHeads + hi) * oldLen) * headDim, combined, dst, oldLen * headDim);
-                Array.Copy(newHost, ((bi * kvHeads + hi) * newLen) * headDim, combined, dst + oldLen * headDim, newLen * headDim);
-            }
-        return _backend.FromHost(combined, new Shape(batch, kvHeads, total, headDim), DType.F32);
+        return _backend.Cat(existing, incoming, axis: 2); // [b,kvh,oldLen,dh] ⊕ [b,kvh,newLen,dh] → [b,kvh,total,dh]
     }
 }

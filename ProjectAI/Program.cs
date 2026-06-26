@@ -1,7 +1,9 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using ProjectAI.Backends.Cpu;
+using ProjectAI.Backends.Torch;
 using ProjectAI.Core;
+using ProjectAI.Formats.Datasets;
 using ProjectAI.Models;
 using ProjectAI.Tokenizers;
 using ProjectAI.Training;
@@ -9,9 +11,11 @@ using ProjectAI.Training;
 Console.WriteLine("ProjectAI — local, hand-written AI runtime (.NET 10)");
 Console.WriteLine();
 
-// Composition root. Stage 2 adds TorchComputeBackend (CUDA/MPS) and VulkanComputeBackend
-// behind this same interface — selected here by config/flags without touching call sites.
-using IComputeBackend backend = new CpuComputeBackend();
+// Composition root. The default backend is chosen ONCE here (--backend cpu|torch [--device cpu|cuda|metal]);
+// every call site below depends only on IComputeBackend, so the GPU path requires no change above this seam.
+// `serve` additionally lets the client switch backend per request (see ComputeRegistry), seeded with this one.
+string backendId = ResolveBackendId(args);
+using IComputeBackend backend = CreateBackend(backendId);
 Console.WriteLine($"Active backend: {backend.Name} on {backend.Device}");
 Console.WriteLine();
 
@@ -39,6 +43,13 @@ switch (command)
         RunGenerate(backend, opts.Load, opts.Prompt, opts.Sampler);
         break;
     }
+    case "tokenize":
+    {
+        var opts = ParseCliOptions(args.Length > 1 ? args[1..] : []);
+        string ckpt = opts.Load ?? Path.Combine("checkpoints", opts.Name + ".ckpt");
+        RunTokenize(opts.Prompt, ckpt);
+        break;
+    }
     case "serve":
     {
         var opts = ParseCliOptions(args.Length > 1 ? args[1..] : []);
@@ -54,30 +65,79 @@ switch (command)
             modelsDir = opts.Models ?? "checkpoints";
             defaultModel = "model";
         }
-        Server.Run(backend, modelsDir, defaultModel, opts.Port);
+        Server.Run(backend, backendId, modelsDir, defaultModel, opts.Port);
         break;
     }
     case "convert":
     {
         var opts = ParseCliOptions(args.Length > 1 ? args[1..] : []);
-        RunConvert(backend, opts.Prompt, opts.Name);
+        RunConvert(backend, opts.Prompt, opts.Name, opts.Bf16);
+        break;
+    }
+    case "convert-dataset":
+    {
+        var opts = ParseCliOptions(args.Length > 1 ? args[1..] : []);
+        RunConvertDataset(opts);
         break;
     }
     default:
-        Console.WriteLine("Usage: projectai <demo|train|generate|serve|convert>");
+        Console.WriteLine("Usage: projectai <demo|train|generate|tokenize|serve|convert>");
         Console.WriteLine("  demo            Stage 0 milestone: fit y = Wx + b with our own autograd + AdamW.");
         Console.WriteLine("  train [prompt] [--name M] [--data <file>] [--steps N] [--batch B] [--seqlen S] [--lr X] [--temp T] [--topk K] [--topp P] [--seed S]");
         Console.WriteLine("                  No --data: train a tiny LLaMA on a built-in corpus. With --data <file>: train on");
         Console.WriteLine("                  your own text. Saves checkpoints/<name>.ckpt (--name, default 'model') for the picker.");
         Console.WriteLine("  generate --load <checkpoint> [prompt] [--temp T] [--topk K] [--topp P] [--seed S]");
         Console.WriteLine("                  Reload a saved checkpoint (architecture read from the file) and generate.");
+        Console.WriteLine("  tokenize <text> [--load <checkpoint>] [--name M]");
+        Console.WriteLine("                  Show how <text> splits into tokens (ids + pieces) for a model's tokenizer.");
         Console.WriteLine("  serve [--models <dir>] [--load <checkpoint>] [--port N]");
         Console.WriteLine("                  Serve an HTTP API (POST /generate, GET /health, GET /models) over a directory of");
         Console.WriteLine("                  trained .ckpt models (default ./checkpoints) so the UI client can pick a model.");
         Console.WriteLine("  convert <hf-model-dir> [--name M]");
         Console.WriteLine("                  Convert a HuggingFace Llama checkpoint (config.json + .safetensors) to a .ckpt.");
+        Console.WriteLine("  convert-dataset --input <text-file> [--output <dir>] [--seqlen S] [--format text]");
+        Console.WriteLine("                  Pre-tokenize a corpus into a packed token-id dataset (mmap'd at train time),");
+        Console.WriteLine("                  then train on it with: train --data <dir>.");
+        Console.WriteLine();
+        Console.WriteLine("  Global:  --backend cpu|torch   Pick the compute backend (default cpu).");
+        Console.WriteLine("           --device cpu|cuda|metal Device for the torch backend (default cpu; cuda needs a libtorch bundle).");
         Console.WriteLine("                  Default decoding is greedy; any sampling flag switches to temperature/top-k/top-p.");
         break;
+}
+
+// Resolves the default compute backend id from --backend / --device (scanned from the raw args before command
+// dispatch), then creates it — probing the native runtime so a missing libtorch bundle or an absent GPU fails fast
+// with clear guidance rather than deep inside training. `serve` reuses the id to seed the per-request registry.
+static string ResolveBackendId(string[] cliArgs)
+{
+    try { return Backends.ResolveId(ArgValue(cliArgs, "--backend"), ArgValue(cliArgs, "--device")); }
+    catch (ArgumentException ex) { return Die<string>(ex.Message); }
+}
+
+static IComputeBackend CreateBackend(string id)
+{
+    try { return Backends.Create(id); }
+    catch (Exception ex)
+    {
+        return Die<IComputeBackend>(
+            $"could not start the '{id}' backend ({ex.Message}). For a GPU/torch backend install a libtorch bundle " +
+            "(TorchSharp-cuda-windows for an RTX 4090, or libtorch-cpu) — see ProjectAI.Backends.Torch.csproj.");
+    }
+}
+
+static string? ArgValue(string[] a, string flag)
+{
+    for (int i = 0; i < a.Length - 1; i++)
+        if (a[i] == flag) return a[i + 1];
+    return null;
+}
+
+[DoesNotReturn]
+static T Die<T>(string message)
+{
+    Console.Error.WriteLine($"error: {message}");
+    Environment.Exit(2);
+    throw new InvalidOperationException("unreachable");
 }
 
 // Parses the prompt, decoding flags, and (for train) data/hyperparameter flags. No sampling flag → greedy;
@@ -94,6 +154,9 @@ static CliOptions ParseCliOptions(string[] rest)
     string name = "model";
     int steps = 400, batch = 8, seqLen = 64, port = 8080;
     float lr = 3e-3f;
+    bool bf16 = false;
+    string? input = null, output = null;
+    string format = "text";
     var promptParts = new List<string>();
 
     for (int i = 0; i < rest.Length; i++)
@@ -114,6 +177,13 @@ static CliOptions ParseCliOptions(string[] rest)
             case "--seqlen": seqLen = ParseIntFlag(rest, ref i, tok); break;
             case "--lr": lr = ParseFloatFlag(rest, ref i, tok); break;
             case "--port": port = ParseIntFlag(rest, ref i, tok); break;
+            case "--bf16": bf16 = true; break; // convert: load + run the model in BF16 (half memory, S3-1)
+            case "--input": input = ParseStringFlag(rest, ref i, tok); break;   // convert-dataset: source corpus
+            case "--output": output = ParseStringFlag(rest, ref i, tok); break; // convert-dataset: dataset dir
+            case "--format": format = ParseStringFlag(rest, ref i, tok); break; // convert-dataset: text|parquet|jsonl
+            // Consumed at the composition root (CreateBackend); accepted here so they aren't flagged as unknown.
+            case "--backend": _ = ParseStringFlag(rest, ref i, tok); break;
+            case "--device": _ = ParseStringFlag(rest, ref i, tok); break;
             default:
                 if (tok.StartsWith("--", StringComparison.Ordinal)) Fail($"unknown flag '{tok}'");
                 promptParts.Add(tok);
@@ -136,7 +206,7 @@ static CliOptions ParseCliOptions(string[] rest)
     ISampler sampler = sample
         ? new TopKTopPSampler(new PcgRng(seed), temperature, topK, topP)
         : new GreedySampler();
-    return new CliOptions(prompt, sampler, load, data, models, name, steps, batch, seqLen, lr, port);
+    return new CliOptions(prompt, sampler, load, data, models, name, steps, batch, seqLen, lr, port, bf16, input, output, format);
 
     static float ParseFloatFlag(string[] a, ref int i, string flag)
     {
@@ -233,6 +303,13 @@ static void RunLlmDemo(IComputeBackend be, string prompt, ISampler sampler, stri
 // checkpoint, then generates from the prompt.
 static void RunTrainFile(IComputeBackend be, CliOptions opts)
 {
+    // A packed dataset (a directory with a manifest, or the manifest itself) trains via the mmap'd PackedBinDataset
+    // and reads its sequence length / vocab / tokenizer from the manifest; otherwise --data is a raw text file.
+    if (DatasetManifest.TryResolvePath(opts.Data!) is not null)
+    {
+        RunTrainPacked(be, opts);
+        return;
+    }
     if (!File.Exists(opts.Data!))
     {
         Console.Error.WriteLine($"error: data file '{opts.Data}' not found");
@@ -264,7 +341,86 @@ static void RunTrainFile(IComputeBackend be, CliOptions opts)
     Generate(be, model, tokenizer, opts.Prompt, opts.Sampler, config);
 }
 
-static void SaveAndAnnounce(IComputeBackend be, LlamaModel model, ModelConfig config, BpeTokenizer tokenizer, int step, string name)
+// Offline: pre-tokenize a local text corpus into a packed token-id binary + manifest that `train --data <dir>`
+// memory-maps. The first stage of the HuggingFace data path (P0): raw text in, packed dataset out, byte-level BPE
+// (the same tokenizer `train` uses, so the ids line up). Parquet/JSONL and hub auto-download are later phases.
+static void RunConvertDataset(CliOptions opts)
+{
+    if (string.IsNullOrWhiteSpace(opts.Input) || !File.Exists(opts.Input))
+    {
+        Console.Error.WriteLine($"error: convert-dataset needs --input <text-file>; got '{opts.Input}'");
+        Console.Error.WriteLine("usage: projectai convert-dataset --input <text-file> [--output <dir>] [--seqlen S] [--format text]");
+        Environment.Exit(2);
+        return;
+    }
+    if (!string.Equals(opts.Format, "text", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine($"error: --format '{opts.Format}' is not supported yet (P0 reads raw text; Parquet/JSONL land in P1).");
+        Environment.Exit(2);
+        return;
+    }
+
+    string outputDir = opts.Output ?? Path.Combine("datasets", Path.GetFileNameWithoutExtension(opts.Input));
+    var reader = new RawTextDatasetReader();
+    var tokenizer = new BpeTokenizer([]); // byte-level — matches `train`/RunTrainFile so the ids are interchangeable
+
+    Console.WriteLine($"Packing '{opts.Input}' → '{outputDir}'  (byte-level BPE, sequence length {opts.SeqLen}) …");
+    DatasetManifest manifest;
+    try
+    {
+        manifest = DatasetPacker.Pack(
+            reader.ReadDocuments(opts.Input), tokenizer, opts.SeqLen, outputDir,
+            appendEosBetweenDocuments: true, sourceId: opts.Input);
+    }
+    catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+    {
+        Console.Error.WriteLine($"error: {ex.Message}");
+        Environment.Exit(2);
+        return;
+    }
+
+    Console.WriteLine($"  {manifest.TotalTokens:N0} tokens → {manifest.BlockCount:N0} blocks of {manifest.SequenceLength + 1} ids ({manifest.Dtype}); {manifest.DroppedTokens} dropped.");
+    Console.WriteLine($"Wrote {Path.Combine(outputDir, DatasetManifest.FileName)}");
+    Console.WriteLine($"Train on it:  train --data {outputDir} --steps {opts.Steps} --batch {opts.Batch}");
+}
+
+// Trains on a packed dataset directory (manifest + .bin). Sequence length, vocab size, and the tokenizer are read
+// FROM the manifest — never CLI defaults — so a dataset packed at one sequence length can't be silently trained at
+// another, and the checkpoint embeds the exact tokenizer the ids were produced with (so `generate` decodes right).
+static void RunTrainPacked(IComputeBackend be, CliOptions opts)
+{
+    using var dataset = PackedBinDataset.Open(opts.Data!);
+    var m = dataset.Manifest;
+    int seqLen = m.SequenceLength;
+    if (opts.SeqLen != seqLen)
+        Console.WriteLine($"note: using sequence length {seqLen} from the dataset manifest (ignoring --seqlen {opts.SeqLen}).");
+
+    ITokenizer tokenizer = TokenizerCodec.Deserialize(m.TokenizerKind, m.TokenizerState);
+    var config = DemoConfig() with
+    {
+        VocabSize = m.VocabSize,
+        MaxSequenceLength = Math.Max(DemoConfig().MaxSequenceLength, seqLen),
+    };
+
+    var model = new LlamaModel(ParameterContext.Create(be, 0), config);
+    long paramCount = model.Parameters().Sum(p => p.ElementCount);
+    Console.WriteLine($"Training a tiny LLaMA ({config.LayerCount} layers, dModel {config.EmbeddingDim}, ~{paramCount:N0} params)");
+    Console.WriteLine($"on packed dataset '{opts.Data}' — {dataset.Count} blocks of {seqLen} tokens (vocab {m.VocabSize}, {m.TokenizerKind}), batch {opts.Batch}, {opts.Steps} steps.");
+    Console.WriteLine();
+
+    var report = new Trainer(be).Train(model, dataset, new TrainingConfig
+    {
+        BatchSize = opts.Batch, SequenceLength = seqLen, LearningRate = opts.Lr, MaxSteps = opts.Steps,
+        WarmupSteps = Math.Min(100, opts.Steps / 10), Seed = 0, CheckpointDirectory = "",
+        OnStep = (step, loss) => { if (step == 1 || step % 20 == 0) Console.WriteLine($"  step {step,4}   loss {loss:F4}"); },
+    });
+    Console.WriteLine($"  loss {report.FirstLoss:F3} → {report.LastLoss:F3}  ({report.FinalStep} steps)");
+
+    SaveAndAnnounce(be, model, config, tokenizer, report.FinalStep, opts.Name);
+    Generate(be, model, tokenizer, opts.Prompt, opts.Sampler, config);
+}
+
+static void SaveAndAnnounce(IComputeBackend be, LlamaModel model, ModelConfig config, ITokenizer tokenizer, int step, string name)
 {
     string checkpoint = Path.Combine("checkpoints", name + ".ckpt");
     Directory.CreateDirectory("checkpoints");
@@ -275,21 +431,27 @@ static void SaveAndAnnounce(IComputeBackend be, LlamaModel model, ModelConfig co
 
 // Converts a HuggingFace Llama checkpoint (config.json + .safetensors) into our model and saves it. Weights
 // only — the model's own tokenizer is a separate step, so text isn't meaningful until that lands.
-static void RunConvert(IComputeBackend be, string source, string name)
+static void RunConvert(IComputeBackend be, string source, string name, bool bf16)
 {
     if (string.IsNullOrWhiteSpace(source) || (!File.Exists(source) && !Directory.Exists(source)))
     {
         Console.Error.WriteLine($"error: convert needs a HuggingFace model directory or .safetensors file; got '{source}'");
-        Console.Error.WriteLine("usage: projectai convert <model-dir> [--name <out>]");
+        Console.Error.WriteLine("usage: projectai convert <model-dir> [--name <out>] [--bf16]");
+        Environment.Exit(2);
+    }
+    if (bf16 && be.Name != "torchsharp")
+    {
+        Console.Error.WriteLine("error: --bf16 needs the Torch backend (the CPU reference is F32-only); add --backend torch --device cuda.");
         Environment.Exit(2);
     }
 
-    Console.WriteLine($"Converting '{source}' …");
+    var computeDType = bf16 ? DType.BF16 : DType.F32;
+    Console.WriteLine($"Converting '{source}' … ({(bf16 ? "BF16 — half memory" : "F32")})");
     LlamaModel model;
     ModelConfig config;
     try
     {
-        (model, config) = Converter.Load(source, be);
+        (model, config) = Converter.Load(source, be, computeDType);
     }
     catch (Exception ex)
     {
@@ -337,9 +499,38 @@ static void Generate(IComputeBackend be, LlamaModel model, ITokenizer tokenizer,
 {
     Console.WriteLine();
     Console.WriteLine($"Prompt:    \"{prompt}\"");
-    string text = Inference.GenerateText(be, model, tokenizer, config, prompt, sampler, maxTokens: 48);
-    Console.WriteLine($"Generated: \"{text}\"");
+    var gen = Inference.GenerateText(be, model, tokenizer, config, prompt, sampler, maxTokens: 48);
+    Console.WriteLine($"Generated: \"{gen.FullText}\"");
 }
+
+// Shows how a string splits into tokens for a model's tokenizer: each id + its decoded piece, plus the round-trip.
+// Loads ONLY the tokenizer from the checkpoint (no weights), so it's instant even for multi-GB models.
+static void RunTokenize(string text, string checkpoint)
+{
+    if (!File.Exists(checkpoint))
+    {
+        Console.Error.WriteLine($"error: checkpoint '{checkpoint}' not found (use --load <ckpt>, or --name <model> for checkpoints/<model>.ckpt)");
+        Environment.Exit(2);
+    }
+    ITokenizer tokenizer;
+    try { tokenizer = Checkpointing.LoadTokenizer(checkpoint); }
+    catch (Exception ex) { Console.Error.WriteLine($"error: {ex.Message}"); Environment.Exit(2); return; }
+
+    var ids = tokenizer.Encode(text);
+    Console.WriteLine($"Tokenizer: {checkpoint}  (vocab {tokenizer.VocabSize})");
+    Console.WriteLine($"Text:      \"{text}\"");
+    Console.WriteLine($"Tokens:    {ids.Count}");
+    foreach (int id in ids)
+    {
+        string piece = tokenizer.Decode([id]);
+        Console.WriteLine($"  [{id,6}]  {(piece.Length == 0 ? "·(special/control)" : $"\"{EscapeWs(piece)}\"")}");
+    }
+    string round = tokenizer.Decode(ids);
+    Console.WriteLine($"Decoded:   \"{round}\"  ({(round == text ? "round-trips ✓" : "differs ✗")})");
+}
+
+static string EscapeWs(string s) =>
+    s.Replace("\\", "\\\\").Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
 
 // The fixed architecture shared by `train` (which saves it) and `generate` (which restores it).
 static ModelConfig DemoConfig() => new()
@@ -413,4 +604,5 @@ static void RunStage0Demo(IComputeBackend be)
 // Parsed CLI options shared across commands: the prompt, decoder, optional checkpoint to load, the training
 // data file + hyperparameters (train --data), and the serve port.
 internal sealed record CliOptions(
-    string Prompt, ISampler Sampler, string? Load, string? Data, string? Models, string Name, int Steps, int Batch, int SeqLen, float Lr, int Port);
+    string Prompt, ISampler Sampler, string? Load, string? Data, string? Models, string Name, int Steps, int Batch, int SeqLen, float Lr, int Port, bool Bf16,
+    string? Input, string? Output, string Format);

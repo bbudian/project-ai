@@ -140,11 +140,15 @@ re-running the whole sequence. Decode reproduces the full-forward logits (tested
 the cache guards layer/batch/length bounds and documents its single-stream / uniform-batch assumption.
 `dotnet test` is green (218 passing, 0 skipped).
 **HTTP API + UI client**: `projectai serve [--models <dir>] [--port N]` serves a local JSON API over
-`HttpListener` (`GET /health`, `GET /models`, `POST /generate`; request body capped, inputs validated, no web
+`HttpListener` (`GET /health`, `GET /models`, `POST /generate`, `POST /train` + `GET /train/status`; request body capped, inputs validated, no web
 framework dependency; `Server.cs`/`ModelRegistry.cs`/`Inference.cs`) over a directory of trained `.ckpt` models —
-each request names a model, loaded once and cached, with path-traversal protection. A Godot 4.7 C# client
-(DRY/SOLID components: `ApiClient`, `Sidebar`, `Transcript`, `Composer` with a **model picker**, `Palette`) in
-`Client/ai-client/` is the Claude-desktop-style front end.
+each request names a model, loaded once and cached, with path-traversal protection. The server also serves a
+**choice of compute backend per request** (`ComputeRegistry.cs` + the `Backends.cs` catalog/factory): the startup
+backend is seeded; any other catalog backend (cpu / torch:cpu / torch:cuda / torch:metal) the client picks is
+created lazily and cached, and `/health` reports each with its availability + reason (probed via
+`TorchComputeBackend.IsAvailable`). A Godot 4.7 C# client (DRY/SOLID components: `ApiClient`, `Sidebar`,
+`Transcript`, `Composer` with a **model picker + a CPU/GPU backend picker**, `Palette`) in `Client/ai-client/`
+is the Claude-desktop-style front end.
 **`convert` done (Tier 2)** — `Converter` + the `convert` CLI map a HuggingFace Llama `config.json` +
 `.safetensors` into a `LlamaModel` (HF tensor-name remap; no RoPE permutation since we already use HF's
 rotate-half convention; fails loudly on untied embeddings / QK-norm / non-SiLU / attention-bias / **rope_scaling**).
@@ -152,8 +156,72 @@ It also loads the model's `tokenizer.json` via **`HfTokenizer`** (faithful byte-
 rank-ordered merges, EOS/BOS by id) so generated text is meaningful. Checkpoints are now tokenizer-agnostic
 (`bpe`/`hf` kinds) and the whole inference path uses `ITokenizer`. Synthetic tests cover the weight round-trip
 (bit-identical), the arch guards, the HF-BPE encode/decode (incl. splitting added/special tokens out before BPE), and the `hf`-checkpoint
-round-trip. `dotnet test` is green (233 passing, 0 skipped). *(Caveat: CPU/F32 → only small models are practical; byte-exact HF tokenizer
+round-trip. *(Caveat: CPU/F32 → only small models are practical; byte-exact HF tokenizer
 parity and the real end-to-end run happen on the user's machine — no model download in this sandbox.)*
-Next in Stage 1: **S1-5** (GGUF); then **Stage 2** GPU backends to make real models fast.
+**Stage 2 in progress — S2-1 + S2-2 done.** **S2-1 (conformance suite)**: `BackendConformanceTests` runs every
+`IComputeBackend` op (elementwise+broadcast, MatMul incl. batched/transposeB, reductions, Softmax/RmsNorm/Silu/RoPE,
+Gather/ScatterAddRows/CrossEntropy/grad) on each candidate backend and asserts a match to the `Backends.Cpu` oracle
+within an atol/rtol of 1e-4 — the safety net for the GPU backends; adding a backend is one factory entry in
+`BackendFactories`. **S2-2 (TorchSharp backend)**: `TorchComputeBackend` implements `IComputeBackend` over libtorch
+(CUDA/Windows, MPS/Mac, CPU anywhere). Bridge: `Handle` holds a contiguous base torch tensor and every op reconstructs
+our logical view via `as_strided(shape,strides,offset)` — reusing libtorch's own striding/broadcasting. Each op runs
+in a `DisposeScope` (intermediates/views freed deterministically; only the contiguous result escapes) — without it a
+transformer step leaks thousands of native tensors. **Verified against the oracle**: all 30 conformance ops (now incl.
+transposed/sliced-offset/stride-0-broadcast/GQA-batch-broadcast views) pass on real libtorch-cpu, and `demo --backend
+torch` trains y=Wx+b to ~0 loss through the full autograd+AdamW path. The CLI picks the backend once at the composition
+root (`--backend cpu|torch [--device cpu|cuda|metal]`). Managed TorchSharp is referenced so it builds everywhere; the
+native libtorch bundle is opt-in per machine (the Torch conformance test skips without one). *(Adversarially reviewed;
+the confirmed leak was fixed — residual: live-graph result tensors are still GC-finalized between steps, so deterministic
+handle lifetime + pooling stays S2-3.)*
+**S1-5 (GGUF loader) — float path done**: `GgufLoader` parses GGUF v2/v3 defensively (magic/version, the typed
+metadata KV table incl. arrays, tensor descriptors, aligned data section), materializes F32/F16/BF16 → F32, and
+reverses GGUF's innermost-first `ne[]` dims to our row-major `Shape` (byte layout already matches). Bounds-checked
+like `SafetensorsLoader`; `LoadFile` also returns parsed metadata for a future GGUF→`ModelConfig` convert path.
+Tested on synthetic GGUF v3 files (float load + dim reversal + metadata; quantized/bad-magic/bad-version rejected).
+Quantized block dequant (Q8_0/Q4_K/…) is **deferred to S3-3** (rejected with a clear type-named error today).
+Both the Torch backend and the GGUF loader were put through an adversarial review-and-verify workflow (16 findings,
+7 confirmed); fixes landed for the Torch native-tensor leak, the GGUF offset-overflow bounds check, and the GGUF
+non-power-of-two alignment guard, plus the new strided conformance cases. `dotnet test` is green (268 passing, 0 skipped).
+**S2-3 (deterministic per-step memory) done**: `IComputeBackend` gained `BeginScope()`/`KeepAlive(Tensor)` (default
+no-op; the Torch backend maps them to a libtorch `DisposeScope` + `MoveToOuterDisposeScope`). The trainer scopes each
+micro-batch's forward+backward (keeping only the accumulated grads) and `AdamW.Step` scopes its update (keeping only
+the new moments), so a step's activation graph is freed on the GPU *before* the optimizer/next step allocates instead
+of lingering until the GC. Verified: a 47M model now trains at batch 16 where it previously OOMed, and the overfit/
+grad-accum/bit-identical-checkpoint tests still pass (CPU scope is a no-op).
+**S3-2 (gradient checkpointing + deterministic release) done**: `Autograd.Checkpoint(segment, input, params)` runs a
+transformer block under `no_grad` in its own scope (keeping only the block output), then in backward recomputes it
+from a detached input — via the surrogate scalar `Σ(recomputed ⊙ upstream)` whose grad is exactly the upstream — in
+a nested scope that frees the recompute the moment its grads are extracted, so peak activation memory is ~one block.
+`LlamaModel.GradientCheckpointing` wires the block loop; the trainer/CLI (`--checkpoint`, auto for `large`) and server
+(`large`) enable it. Separately, `IComputeBackend.Release(Tensor)` (Torch → `Dispose`; CPU no-op) frees *superseded*
+AdamW moments + gradients immediately instead of leaving the GC to reclaim several GB/step — that churn, not
+activations, was the real OOM on big models. Verified: bit-exact gradient-check (checkpointed == standard grads) on
+both the CPU oracle and real libtorch, and `medium @ batch 64` (which OOMs without) trains with `--checkpoint`.
+*(208M `large` is still ~3.3 GB resident state in F32+AdamW — too much for the 8 GB dev laptop, fine on the 4090;
+BF16/mixed-precision is S3-1.)*
+**S3-1 (half-precision inference) — started**: `ParameterContext.ComputeDType` (default F32) threads a precision
+through param creation (`Module.Param`) and the model's constants (RoPE tables, attention scale, causal mask, KV-cache
+concat), so a model built with `ComputeDType=BF16` runs its whole forward in bf16 — halving weight/activation memory
+(a 7B drops 28→14 GB, fitting a 4090). Forward ops infer their output dtype from inputs, so no per-op change was
+needed; bf16 is Torch-only (the CPU oracle stays F32). **BF16 loading is wired end-to-end**: `SafetensorsLoader.Load`
+takes a target dtype (each tensor widened to an F32 host buffer transiently, then materialized at BF16 — peak host
+is one tensor, not the model), `Converter.Load`/`convert --bf16` build + load the model at BF16, and the checkpoint
+round-trips it (the on-disk payload is F32 but `Meta.ComputeDType` records the precision and `Checkpoint.Load` casts
+back to BF16 via a metadata-first read, so `convert --bf16 → serve` stays half-precision). Verified: BF16 logits track
+F32, and a BF16 model survives save→load (both on libtorch); `dotnet test` green (274). *Next for S3-1: mixed-precision
+TRAINING (master-F32 + loss scaling). Then **S3-3 quantization** (Q4_K/Q8_0 dequant-on-use) for ~32B on the 4090.*
+*(Caveat: the BF16 checkpoint is still F32 on disk — 2× size; storing bf16 bytes to halve the file is a later format bump.)*
+**Training UX (train your own model, three ways)**: (1) `ProjectAI.Trainer` is a launchable trainer project
+(`train.cmd` / `Train-Model.ps1`) — point it at a text file and it trains on CUDA (auto), saves a checkpoint, samples
+it, and prints how to serve. (2) The **server trains over HTTP**: `POST /train` starts a background job (one at a time;
+`/generate` is gated while it runs), `GET /train/status` polls live progress, and the finished model lands in the
+models dir → appears in the picker (`TrainingService.cs`, `ModelTrainer.cs`). (3) A **Train tab in the Godot client**
+(`TrainPanel.cs`) — pick a file, size, backend, steps → watch the progress bar → it shows up in the chat picker.
+Size presets (tiny/small/medium/large, with memory-aware default batch) live in `ProjectAI.Models/ModelPresets.cs`;
+`Inference` moved to `ProjectAI.Training` so CLI/server/trainer share it. Verified end-to-end on the GPU: train via
+CLI and via `POST /train`→poll→`/generate`. *(Caveat: the dev/test GPU is 8GB — tiny/small/medium train there
+(medium up to batch 64 with `--checkpoint`); large (~208M) needs the 4090 — its F32+AdamW resident state alone is
+~3.3GB regardless of activations, so it awaits S3-1 BF16.)* Next: the **S2-4/5** Vulkan
+path, finish **S2-6** backend selection.
 (Deferred: `NamedParameters` ordering at S1-4; **RoPE scaling** + Llama-3 pre-tokenizer regex in convert; paged
 KV cache (S3-4) — see `docs/BUILD_PLAN.md`.)

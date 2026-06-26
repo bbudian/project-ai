@@ -14,6 +14,9 @@ internal sealed class ModelRegistry
     // Keyed by the canonical resolved path (case-insensitive) so case-aliased names ("model"/"MODEL") don't
     // load the same checkpoint twice.
     private readonly Dictionary<string, LoadedModel> _cache = new(StringComparer.OrdinalIgnoreCase);
+    // Tokenizer-only cache (no weights), guarded because /tokenize runs on request threads without the InferenceLock.
+    private readonly Dictionary<string, ITokenizer> _tokenizers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _tokLock = new();
 
     public ModelRegistry(IComputeBackend backend, string directory)
     {
@@ -46,6 +49,23 @@ internal sealed class ModelRegistry
         var loaded = new LoadedModel(name, model, config, tokenizer, step);
         _cache[path] = loaded;
         return loaded;
+    }
+
+    /// <summary>
+    /// Loads just the tokenizer for a model (no weights) — cheap even for multi-GB checkpoints. Null if the name
+    /// doesn't map to a checkpoint in the directory. Thread-safe (called off the InferenceLock by /tokenize).
+    /// </summary>
+    public ITokenizer? GetTokenizer(string name)
+    {
+        string? path = ResolvePath(name);
+        if (path is null) return null;
+        lock (_tokLock)
+        {
+            if (_tokenizers.TryGetValue(path, out var cached)) return cached;
+            var tok = Checkpointing.LoadTokenizer(path);
+            _tokenizers[path] = tok;
+            return tok;
+        }
     }
 
     // Accept a name only if it's a plain file name (no separators, NUL, or other invalid chars) AND

@@ -21,8 +21,11 @@ public static class Converter
 {
     private static readonly SafetensorsLoader Loader = new();
 
-    /// <summary>Loads an HF model directory (or a single .safetensors with an adjacent config.json) into a model.</summary>
-    public static (LlamaModel Model, ModelConfig Config) Load(string path, IComputeBackend backend)
+    /// <summary>
+    /// Loads an HF model directory (or a single .safetensors with an adjacent config.json) into a model at the given
+    /// precision. Pass <paramref name="computeDType"/> = BF16 to load + run at half memory (S3-1) so a larger model fits.
+    /// </summary>
+    public static (LlamaModel Model, ModelConfig Config) Load(string path, IComputeBackend backend, DType computeDType = DType.F32)
     {
         string directory = Directory.Exists(path) ? path : Path.GetDirectoryName(Path.GetFullPath(path))!;
         string configPath = Path.Combine(directory, "config.json");
@@ -33,10 +36,10 @@ public static class Converter
         var config = ConfigFromHuggingFace(configJson);
         config.Validate();
 
-        var weights = LoadWeights(path, directory, backend);
+        var weights = LoadWeights(path, directory, backend, computeDType);
         CheckCompatibility(configJson, weights);
 
-        var model = new LlamaModel(ParameterContext.Create(backend, 0), config);
+        var model = new LlamaModel(ParameterContext.Create(backend, 0, computeDType), config);
         CopyWeights(weights, model, backend);
         return (model, config);
     }
@@ -121,20 +124,20 @@ public static class Converter
         return $"model.layers.{index}.{hf}";
     }
 
-    private static StateDict LoadWeights(string path, string directory, IComputeBackend backend)
+    private static StateDict LoadWeights(string path, string directory, IComputeBackend backend, DType targetDType)
     {
         if (!Directory.Exists(path) && path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
-            return Loader.Load(path, backend);
+            return Loader.Load(path, backend, targetDType);
 
         string single = Path.Combine(directory, "model.safetensors");
-        if (File.Exists(single)) return Loader.Load(single, backend);
+        if (File.Exists(single)) return Loader.Load(single, backend, targetDType);
 
         var shards = Directory.GetFiles(directory, "*.safetensors");
         if (shards.Length == 0) throw new FileNotFoundException($"no .safetensors files in '{directory}'.");
 
         var merged = new StateDict();
         foreach (var shard in shards.OrderBy(s => s, StringComparer.Ordinal))
-            foreach (var (name, tensor) in Loader.Load(shard, backend).Tensors)
+            foreach (var (name, tensor) in Loader.Load(shard, backend, targetDType).Tensors)
                 merged[name] = tensor;
         return merged;
     }

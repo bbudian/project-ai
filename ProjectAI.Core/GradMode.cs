@@ -13,15 +13,18 @@ public static class GradMode
     public static bool IsEnabled => !_disabled;
 
     /// <summary>Disables grad mode until the returned scope is disposed.</summary>
-    public static IDisposable NoGrad() => new Scope();
+    public static IDisposable NoGrad() => new Scope(disabled: true);
+
+    /// <summary>Forces grad mode ON until the returned scope is disposed — e.g. to recompute a checkpointed segment during backward (ticket S3-2).</summary>
+    public static IDisposable Enabled() => new Scope(disabled: false);
 
     private sealed class Scope : IDisposable
     {
         private readonly bool _previous;
-        public Scope()
+        public Scope(bool disabled)
         {
             _previous = _disabled;
-            _disabled = true;
+            _disabled = disabled;
         }
         public void Dispose() => _disabled = _previous;
     }

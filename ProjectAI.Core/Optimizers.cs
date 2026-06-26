@@ -84,12 +84,17 @@ public sealed class AdamW : IOptimizer
         float lr = LearningRateSchedule?.Invoke(_step) ?? LearningRate;
 
         using var _ = GradMode.NoGrad();
+        // Scope the whole update so the per-parameter intermediates (m̂, v̂, adaptive, delta, …) are freed at the
+        // end; only the new moments are kept (S2-3). Parameters update in place (Copy), so they aren't in scope.
+        using var scope = Backend.BeginScope();
         foreach (var p in _parameters)
         {
             if (p.Grad is null) continue;
             var g = p.Grad;
 
             _state.TryGetValue(p, out var s);
+            var previousM = s.M;                        // null on the first step (a freshly-allocated zero below is scope-owned)
+            var previousV = s.V;
             s.M ??= Backend.Allocate(p.Shape, p.DType); // zero-initialized
             s.V ??= Backend.Allocate(p.Shape, p.DType);
             int t = s.T + 1;                            // per-parameter timestep
@@ -98,6 +103,12 @@ public sealed class AdamW : IOptimizer
             var m = Backend.Add(Backend.MulScalar(s.M, Beta1), Backend.MulScalar(g, 1f - Beta1));
             var v = Backend.Add(Backend.MulScalar(s.V, Beta2), Backend.MulScalar(Backend.Mul(g, g), 1f - Beta2));
             _state[p] = (m, v, t);
+            Backend.KeepAlive(m); // moments persist across steps
+            Backend.KeepAlive(v);
+            // Free the previous (now superseded) moments NOW rather than leaving them for the GC — without this a
+            // big model's moment churn accumulates several GB/step on the GPU before a collection runs (S2-3).
+            if (previousM is not null) Backend.Release(previousM);
+            if (previousV is not null) Backend.Release(previousV);
 
             float biasCorrection1 = 1f - MathF.Pow(Beta1, t);
             float biasCorrection2 = 1f - MathF.Pow(Beta2, t);
@@ -113,6 +124,10 @@ public sealed class AdamW : IOptimizer
 
     public void ZeroGrad()
     {
-        foreach (var p in _parameters) p.Grad = null;
+        foreach (var p in _parameters)
+        {
+            if (p.Grad is not null) Backend.Release(p.Grad); // last step's grad is done; free it now (deterministic, S2-3)
+            p.Grad = null;
+        }
     }
 }

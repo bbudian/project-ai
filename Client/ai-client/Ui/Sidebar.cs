@@ -11,6 +11,8 @@ public partial class Sidebar : PanelContainer
     public event Action CheckRequested;
     public event Action<string> ServerUrlChanged;
 
+    private const int MaxRecents = 50; // cap so a long session doesn't accumulate buttons without bound
+
     private VBoxContainer _recents;
     private LineEdit _url;
     private Label _status;
@@ -48,13 +50,27 @@ public partial class Sidebar : PanelContainer
 
     public void AddRecent(string prompt)
     {
-        string text = prompt.Replace("\n", " ").Trim();
-        if (text.Length > 30) text = text[..30] + "…";
+        // Drop an existing identical entry so re-running a prompt moves it to the top instead of duplicating.
+        foreach (var child in _recents.GetChildren())
+            if (child is Button existing && existing.HasMeta("prompt") && existing.GetMeta("prompt").AsString() == prompt)
+            {
+                _recents.RemoveChild(existing); // immediate, so the count below is accurate (QueueFree is deferred)
+                existing.QueueFree();
+                break;
+            }
 
-        var item = Palette.GhostButton(text, 13);
+        var item = Palette.GhostButton(Format.Ellipsize(prompt, 30), 13);
+        item.SetMeta("prompt", prompt); // keep the full prompt for dedup + recall (the label is truncated)
         item.Pressed += () => RecentSelected?.Invoke(prompt);
         _recents.AddChild(item);
         _recents.MoveChild(item, 0); // newest on top
+
+        while (_recents.GetChildCount() > MaxRecents)
+        {
+            var oldest = _recents.GetChild(_recents.GetChildCount() - 1);
+            _recents.RemoveChild(oldest);
+            oldest.QueueFree();
+        }
     }
 
     public void SetStatus(string message, bool error)

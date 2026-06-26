@@ -19,6 +19,9 @@ public static class Palette
     public static readonly Color Border     = new("#323232");
     public static readonly Color Transparent = new(0, 0, 0, 0);
 
+    /// <summary>Default conversation text size — shared by the transcript and the composer's "Text size" control so they can't drift.</summary>
+    public const int DefaultFontSize = 14;
+
     /// <summary>A flat rounded box, optionally padded and bordered — the building block for panels and buttons.</summary>
     public static StyleBoxFlat Box(Color bg, int radius = 0, int pad = 0, int border = 0, Color? borderColor = null)
     {

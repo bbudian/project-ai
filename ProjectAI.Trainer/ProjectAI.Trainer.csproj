@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>projectai-train</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- A composition root: it picks a backend, so it may reference concrete backends (like the CLI does). -->
+    <ProjectReference Include="..\ProjectAI.Core\ProjectAI.Core.csproj" />
+    <ProjectReference Include="..\ProjectAI.Backends.Cpu\ProjectAI.Backends.Cpu.csproj" />
+    <ProjectReference Include="..\ProjectAI.Backends.Torch\ProjectAI.Backends.Torch.csproj" />
+    <ProjectReference Include="..\ProjectAI.Tokenizers\ProjectAI.Tokenizers.csproj" />
+    <ProjectReference Include="..\ProjectAI.Models\ProjectAI.Models.csproj" />
+    <ProjectReference Include="..\ProjectAI.Training\ProjectAI.Training.csproj" />
+  </ItemGroup>
+
+</Project>

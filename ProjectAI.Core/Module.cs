@@ -7,9 +7,20 @@ namespace ProjectAI.Core;
 /// </summary>
 public sealed record ParameterContext(IComputeBackend Backend, Autograd Ag, IRng Rng)
 {
-    /// <summary>Builds a context over a backend with a fresh autograd facade and a seeded RNG.</summary>
+    /// <summary>
+    /// Precision of the model's parameters and constants (RoPE tables, masks). Default F32; set to BF16/F16 to
+    /// build a half-precision model that fits ~2x more on the GPU (ticket S3-1). Activations follow the params'
+    /// dtype, since the forward ops infer their output dtype from their inputs.
+    /// </summary>
+    public DType ComputeDType { get; init; } = DType.F32;
+
+    /// <summary>Builds a context over a backend with a fresh autograd facade and a seeded RNG (F32 params).</summary>
     public static ParameterContext Create(IComputeBackend backend, ulong seed) =>
         new(backend, new Autograd(backend), new PcgRng(seed));
+
+    /// <summary>Builds a context with a chosen parameter precision (e.g. BF16 for half-precision inference).</summary>
+    public static ParameterContext Create(IComputeBackend backend, ulong seed, DType computeDType) =>
+        new(backend, new Autograd(backend), new PcgRng(seed)) { ComputeDType = computeDType };
 }
 
 /// <summary>
@@ -20,8 +31,13 @@ public sealed record ParameterContext(IComputeBackend Backend, Autograd Ag, IRng
 /// </summary>
 public abstract class Module
 {
+    // Dictionaries give O(1) lookup / duplicate-name detection; the parallel key lists pin a documented,
+    // deterministic enumeration order (registration order) that Parameters()/NamedParameters() rely on so
+    // checkpoint IO and AdamW state stay portable across builds — never depend on Dictionary iteration order.
     private readonly Dictionary<string, Tensor> _parameters = new();
+    private readonly List<string> _parameterOrder = new();
     private readonly Dictionary<string, Module> _children = new();
+    private readonly List<string> _childOrder = new();
 
     protected Module(ParameterContext ctx) => Ctx = ctx;
 
@@ -42,38 +58,55 @@ public abstract class Module
     /// </summary>
     protected Tensor Param(string name, Shape shape, IInitializer init)
     {
-        var p = Backend.Allocate(shape, DType.F32); // zero-initialized
+        var p = Backend.Allocate(shape, Ctx.ComputeDType); // zero-initialized, in the model's precision (S3-1)
         p.RequiresGrad = true;
         using (GradMode.NoGrad()) init.Fill(p, Backend, Ctx.Rng);
+        if (!_parameters.ContainsKey(name)) _parameterOrder.Add(name);
         _parameters[name] = p;
         return p;
     }
 
     /// <summary>Registers an externally-created parameter (e.g. a tied or loaded weight).</summary>
-    protected void RegisterParameter(string name, Tensor parameter) => _parameters[name] = parameter;
+    protected void RegisterParameter(string name, Tensor parameter)
+    {
+        if (!_parameters.ContainsKey(name)) _parameterOrder.Add(name);
+        _parameters[name] = parameter;
+    }
 
     /// <summary>Registers a child module and returns it for fluent assignment.</summary>
     protected T RegisterModule<T>(string name, T module) where T : Module
     {
+        if (!_children.ContainsKey(name)) _childOrder.Add(name);
         _children[name] = module;
         return module;
     }
 
-    /// <summary>This module's parameters followed by those of all descendant modules.</summary>
+    /// <summary>
+    /// This module's parameters followed by those of all descendant modules.
+    /// <para>Order is <em>stable and deterministic</em>: this module's parameters in registration order,
+    /// then each child module (in registration order) recursively. It is a pure function of how the model
+    /// is constructed — independent of <see cref="Dictionary{TKey,TValue}"/> iteration — so the optimizer's
+    /// reference-keyed state and the checkpoint's positional layout stay aligned across processes/builds.</para>
+    /// </summary>
     public IEnumerable<Tensor> Parameters()
     {
-        foreach (var p in _parameters.Values) yield return p;
-        foreach (var child in _children.Values)
-            foreach (var p in child.Parameters())
+        foreach (var name in _parameterOrder) yield return _parameters[name];
+        foreach (var childName in _childOrder)
+            foreach (var p in _children[childName].Parameters())
                 yield return p;
     }
 
-    /// <summary>Parameters with dotted names (e.g. "block.0.ffn.gate.weight"); used by checkpoint IO (S1-4).</summary>
+    /// <summary>
+    /// Parameters with dotted names (e.g. "block.0.ffn.gate.weight"); used by checkpoint IO (S1-4).
+    /// <para>Emitted in the same stable registration order as <see cref="Parameters"/> (this module's
+    /// parameters, then each child recursively), so a checkpoint written by one build loads positionally
+    /// into a freshly-constructed model of the same config regardless of dictionary iteration order.</para>
+    /// </summary>
     public IEnumerable<(string Name, Tensor Param)> NamedParameters()
     {
-        foreach (var (name, p) in _parameters) yield return (name, p);
-        foreach (var (childName, child) in _children)
-            foreach (var (name, p) in child.NamedParameters())
+        foreach (var name in _parameterOrder) yield return (name, _parameters[name]);
+        foreach (var childName in _childOrder)
+            foreach (var (name, p) in _children[childName].NamedParameters())
                 yield return ($"{childName}.{name}", p);
     }
 

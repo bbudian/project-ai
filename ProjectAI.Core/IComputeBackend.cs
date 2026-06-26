@@ -56,4 +56,49 @@ public interface IComputeBackend : IDisposable
     Tensor CrossEntropy(Tensor logits, int[] targets, int ignoreIndex);
     /// <summary>Gradient of <see cref="CrossEntropy"/> w.r.t. logits: (softmax − onehot)/validCount, with ignored rows zeroed.</summary>
     Tensor CrossEntropyGrad(Tensor logits, int[] targets, int ignoreIndex);
+
+    // --- Structural ---
+    /// <summary>
+    /// Concatenates <paramref name="a"/> and <paramref name="b"/> along <paramref name="axis"/> (negative counts
+    /// from the end); all other dimensions must match. The result is a fresh contiguous tensor on this backend's
+    /// device. The KV cache uses this to grow on-device each decode step — a device-side concat instead of a host
+    /// round-trip, which on a GPU avoids a per-layer synchronization stall on the per-token hot path.
+    /// </summary>
+    Tensor Cat(Tensor a, Tensor b, int axis);
+
+    // --- Transient memory scoping (ticket S2-3) ---
+
+    /// <summary>
+    /// Begins a scope bounding transient-tensor lifetime. Disposing it deterministically releases the
+    /// backend-native memory of tensors created within it, EXCEPT those passed to <see cref="KeepAlive"/>. The
+    /// managed CPU backend is a no-op (the GC reclaims it); a GPU backend frees native/VRAM here, so a training
+    /// step's activation graph is released before the next step — and the optimizer — allocates, instead of
+    /// stacking on top of it (which otherwise OOMs a GPU). Scopes nest; only the innermost is affected by a call.
+    /// </summary>
+    IDisposable BeginScope() => NoScope.Instance;
+
+    /// <summary>
+    /// Keeps <paramref name="tensor"/> alive past the enclosing <see cref="BeginScope"/> — for state that must
+    /// persist across the scope (accumulated gradients, optimizer moments). A no-op on the CPU backend.
+    /// <para>NOTE: this promotes the tensor out of exactly ONE (the innermost) scope. Most callers never nest
+    /// training scopes, so it detaches to GC lifetime as intended. (Gradient checkpointing DOES nest a recompute
+    /// scope inside the step scope and relies on this one-level move; see <see cref="Autograd.Checkpoint"/>.)</para>
+    /// </summary>
+    void KeepAlive(Tensor tensor) { }
+
+    /// <summary>
+    /// Releases a tensor's backend-native memory NOW instead of waiting for the GC — deterministic lifetime for
+    /// long-lived state that is being replaced (a superseded optimizer moment or gradient). The tensor must not be
+    /// used afterward, and must not be owned by an open <see cref="BeginScope"/> (that scope would double-free it).
+    /// A no-op on the managed CPU backend.
+    /// </summary>
+    void Release(Tensor tensor) { }
+}
+
+/// <summary>The shared no-op scope returned by backends with no native memory to manage (e.g. the managed CPU oracle).</summary>
+internal sealed class NoScope : IDisposable
+{
+    public static readonly NoScope Instance = new();
+    private NoScope() { }
+    public void Dispose() { }
 }

@@ -1,9 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="..\ProjectAI.Core\ProjectAI.Core.csproj" />
+    <!-- Managed TorchSharp bindings: enough to COMPILE the backend everywhere. The native libtorch runtime is a
+         SEPARATE, platform-specific package. On Windows we pull the CUDA bundle so the RTX 4090 lights up as
+         GPU (CUDA) in the client; other OSes stay opt-in (add `libtorch-cpu` 2.10.0, or a macOS/MPS bundle) so a
+         CPU-only checkout still builds and the conformance test skips rather than failing.
+         NOTE: TorchSharp-cuda-windows is a LARGE (~2-3 GB) one-time download on first `dotnet restore`.
+         Verified: this backend passes the full S2-1 conformance suite against the CPU oracle with TorchSharp 0.107.0. -->
+    <PackageReference Include="TorchSharp" Version="0.107.0" />
+    <PackageReference Include="TorchSharp-cuda-windows" Version="0.107.0" Condition="'$(OS)' == 'Windows_NT'" />
   </ItemGroup>
-  <!-- Stage 2: add TorchSharp 0.107.0 + a platform libtorch bundle.
-       Windows / RTX 4090:  <PackageReference Include="TorchSharp-cuda-windows" Version="0.107.0" />
-       macOS / CPU:         <PackageReference Include="TorchSharp" Version="0.107.0" />
-                            <PackageReference Include="libtorch-cpu" Version="2.10.0.1" /> -->
 </Project>

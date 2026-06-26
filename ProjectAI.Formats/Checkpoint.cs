@@ -35,8 +35,10 @@ public static class Checkpoint
 
         foreach (var (name, tensor) in items)
         {
-            if (tensor.DType != DType.F32)
-                throw new NotSupportedException($"checkpoint supports F32 only; tensor '{name}' is {tensor.DType}.");
+            // Weights may be half-precision (S3-1); ToHost widens them to F32 for the on-disk payload. (Storing the
+            // bytes at the tensor's own dtype to halve the file too is a later format bump.)
+            if (tensor.DType is not (DType.F32 or DType.F16 or DType.BF16))
+                throw new NotSupportedException($"checkpoint stores float weights; tensor '{name}' is {tensor.DType}.");
             if (tensor.ElementCount > int.MaxValue)
                 throw new NotSupportedException($"tensor '{name}' has {tensor.ElementCount} elements, exceeding this format's 2^31 limit.");
 
@@ -54,8 +56,12 @@ public static class Checkpoint
         }
     }
 
-    /// <summary>Reads a checkpoint, materializing each tensor onto <paramref name="backend"/>; returns the step, metadata, and tensors.</summary>
-    public static (int Step, string Metadata, StateDict Tensors) Load(string path, IComputeBackend backend)
+    /// <summary>
+    /// Reads a checkpoint, materializing each tensor onto <paramref name="backend"/> at <paramref name="targetDType"/>
+    /// (F32 by default; BF16/F16 casts on the way in so a half-precision model loads small — S3-1). Returns the step,
+    /// metadata, and tensors.
+    /// </summary>
+    public static (int Step, string Metadata, StateDict Tensors) Load(string path, IComputeBackend backend, DType targetDType = DType.F32)
     {
         using var stream = File.OpenRead(path);
         using var reader = new BinaryReader(stream);
@@ -97,10 +103,28 @@ public static class Checkpoint
 
             byte[] bytes = ReadExactly(reader, (int)byteLen, path, $"tensor '{name}' payload");
             var floats = MemoryMarshal.Cast<byte, float>(bytes).ToArray();
-            dict[name] = backend.FromHost(floats, new Shape(dims), DType.F32);
+            dict[name] = backend.FromHost(floats, new Shape(dims), targetDType); // cast to BF16/F16 here keeps the loaded model small
         }
 
         return (step, metadata, dict);
+    }
+
+    /// <summary>Reads only the step + metadata header (not the tensors) — so a caller can learn the model's
+    /// precision/config before materializing the weights at the right dtype.</summary>
+    public static (int Step, string Metadata) ReadMetadata(string path)
+    {
+        using var stream = File.OpenRead(path);
+        using var reader = new BinaryReader(stream);
+
+        Span<byte> magic = stackalloc byte[8];
+        if (reader.Read(magic) != magic.Length || !magic.SequenceEqual(Magic))
+            throw new InvalidDataException($"'{path}' is not a ProjectAI checkpoint (bad magic).");
+
+        int step = reader.ReadInt32();
+        int metaLen = reader.ReadInt32();
+        if (metaLen < 0 || metaLen > 1 << 24) throw new InvalidDataException($"'{path}' has a bad metadata length ({metaLen}).");
+        string metadata = Encoding.UTF8.GetString(ReadExactly(reader, metaLen, path, "metadata"));
+        return (step, metadata);
     }
 
     // Reads exactly count bytes or throws — BinaryReader.ReadBytes silently returns a short buffer at EOF, which

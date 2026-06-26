@@ -14,8 +14,9 @@ namespace ProjectAI.Training;
 /// </summary>
 public static class Checkpointing
 {
-    // TokenizerKind tags which tokenizer the metadata holds so it reconstructs polymorphically.
-    private sealed record Meta(ModelConfig Config, string TokenizerKind, string Tokenizer);
+    // TokenizerKind tags which tokenizer the metadata holds so it reconstructs polymorphically. ComputeDType records
+    // the model's precision (S3-1) so it reloads at the same dtype (default F32 = 0 → old checkpoints load as F32).
+    private sealed record Meta(ModelConfig Config, string TokenizerKind, string Tokenizer, DType ComputeDType = DType.F32);
 
     /// <summary>Writes weights + optimizer moments (if supplied) plus the config/tokenizer metadata for inference reload.</summary>
     public static void SaveModel(
@@ -28,7 +29,8 @@ public static class Checkpointing
             BpeTokenizer bpe => ("bpe", bpe.ToJson()),
             _ => throw new NotSupportedException($"can't persist tokenizer of type {tokenizer.GetType().Name}."),
         };
-        string metadata = JsonSerializer.Serialize(new Meta(config, kind, json));
+        var computeDType = model.Parameters().First().DType; // the precision the model was built/loaded at (S3-1)
+        string metadata = JsonSerializer.Serialize(new Meta(config, kind, json, computeDType));
         Checkpoint.Save(path, step, EnumerateState(model, optimizer), backend, metadata);
     }
 
@@ -39,7 +41,9 @@ public static class Checkpointing
     /// </summary>
     public static (LlamaModel Model, ModelConfig Config, ITokenizer Tokenizer, int Step) LoadModel(string path, IComputeBackend backend)
     {
-        var (step, metadataJson, dict) = Checkpoint.Load(path, backend);
+        // Read the metadata first so we know the model's precision, then materialize the weights at that dtype
+        // (so a half-precision model loads small instead of expanding to F32 — S3-1).
+        var (_, metadataJson) = Checkpoint.ReadMetadata(path);
         if (string.IsNullOrEmpty(metadataJson))
             throw new InvalidDataException($"checkpoint '{path}' has no model metadata; it cannot be loaded for inference (was it saved by `train`?).");
 
@@ -47,16 +51,36 @@ public static class Checkpointing
             ?? throw new InvalidDataException($"checkpoint '{path}' has unreadable model metadata.");
         meta.Config.Validate();
 
-        ITokenizer tokenizer = meta.TokenizerKind switch
-        {
-            "hf" => HfTokenizer.FromState(meta.Tokenizer),
-            "bpe" => BpeTokenizer.FromJson(meta.Tokenizer),
-            _ => throw new InvalidDataException($"checkpoint '{path}' has unknown tokenizer kind '{meta.TokenizerKind}'."),
-        };
-        var model = new LlamaModel(ParameterContext.Create(backend, 0), meta.Config);
+        ITokenizer tokenizer = TokenizerFromMeta(meta, path);
+        var (step, _, dict) = Checkpoint.Load(path, backend, meta.ComputeDType);
+        var model = new LlamaModel(ParameterContext.Create(backend, 0, meta.ComputeDType), meta.Config);
         ApplyWeights(dict, model, backend);
         return (model, meta.Config, tokenizer, step);
     }
+
+    /// <summary>
+    /// Reconstructs ONLY the tokenizer from a checkpoint's metadata — no weights are read, so this is cheap even
+    /// for multi-GB models. Used by the <c>tokenize</c> command / <c>/tokenize</c> endpoint to inspect tokenization.
+    /// </summary>
+    public static ITokenizer LoadTokenizer(string path)
+    {
+        var (_, metadataJson) = Checkpoint.ReadMetadata(path);
+        if (string.IsNullOrEmpty(metadataJson))
+            throw new InvalidDataException($"checkpoint '{path}' has no metadata; it carries no tokenizer to load.");
+        var meta = JsonSerializer.Deserialize<Meta>(metadataJson)
+            ?? throw new InvalidDataException($"checkpoint '{path}' has unreadable model metadata.");
+        return TokenizerFromMeta(meta, path);
+    }
+
+    // Reconstructs the tokenizer polymorphically from the metadata's kind tag. Back-compat: checkpoints written
+    // before the tag existed stored only the tokenizer JSON, and the only tokenizer then was byte-level BPE, so an
+    // absent/empty kind unambiguously means BPE.
+    private static ITokenizer TokenizerFromMeta(Meta meta, string path) => meta.TokenizerKind switch
+    {
+        "hf" => HfTokenizer.FromState(meta.Tokenizer),
+        "bpe" or null or "" => BpeTokenizer.FromJson(meta.Tokenizer),
+        _ => throw new InvalidDataException($"checkpoint '{path}' has unknown tokenizer kind '{meta.TokenizerKind}'."),
+    };
 
     // Model parameters by name, each followed by its optimizer moments under "opt.m::"/"opt.v::" keys.
     internal static IEnumerable<(string Name, Tensor Tensor)> EnumerateState(LlamaModel model, AdamW? optimizer)

@@ -37,5 +37,6 @@ public sealed class VulkanComputeBackend(Device device) : IComputeBackend
     public Tensor ScatterAddRows(Tensor rows, int[] ids, int rowCount) => throw new NotImplementedException("Stage 2.");
     public Tensor CrossEntropy(Tensor logits, int[] targets, int ignoreIndex) => throw new NotImplementedException("Stage 2.");
     public Tensor CrossEntropyGrad(Tensor logits, int[] targets, int ignoreIndex) => throw new NotImplementedException("Stage 2.");
+    public Tensor Cat(Tensor a, Tensor b, int axis) => throw new NotImplementedException("Stage 2.");
     public void Dispose() { }
 }

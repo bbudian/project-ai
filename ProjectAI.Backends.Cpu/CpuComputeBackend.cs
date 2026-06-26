@@ -499,5 +499,45 @@ public sealed class CpuComputeBackend : IComputeBackend
         return new Tensor(new Shape(n, vocab), logits.DType, Device, handle: dst);
     }
 
+    // --- Structural ---
+
+    /// <summary>
+    /// Concatenates two tensors along <paramref name="axis"/> (negative counts from the end). All other dimensions
+    /// must match. Strided inputs are gathered (materialized) first, so a transposed/sliced view concatenates
+    /// correctly — the KV cache appends a transposed value view this way.
+    /// </summary>
+    public Tensor Cat(Tensor a, Tensor b, int axis)
+    {
+        int rank = a.Shape.Rank;
+        if (b.Shape.Rank != rank)
+            throw new ArgumentException($"Cat rank mismatch: {a.Shape} vs {b.Shape}.");
+        int ax = axis < 0 ? axis + rank : axis;
+        if ((uint)ax >= (uint)rank)
+            throw new ArgumentOutOfRangeException(nameof(axis), axis, $"Axis out of range for shape {a.Shape}.");
+        for (int i = 0; i < rank; i++)
+            if (i != ax && a.Shape[i] != b.Shape[i])
+                throw new ArgumentException($"Cat: dimensions must match except on axis {ax}: {a.Shape} vs {b.Shape}.");
+
+        long outer = 1;
+        for (int i = 0; i < ax; i++) outer *= a.Shape[i];
+        long inner = 1;
+        for (int i = ax + 1; i < rank; i++) inner *= a.Shape[i];
+        int la = a.Shape[ax], lb = b.Shape[ax], lt = la + lb;
+
+        var sa = Materialize(a);
+        var sb = Materialize(b);
+        var dst = new float[outer * lt * inner];
+        for (long o = 0; o < outer; o++)
+        {
+            Array.Copy(sa, o * la * inner, dst, o * lt * inner, la * inner);
+            Array.Copy(sb, o * lb * inner, dst, o * lt * inner + la * inner, lb * inner);
+        }
+
+        var outDims = new int[rank];
+        for (int i = 0; i < rank; i++) outDims[i] = a.Shape[i];
+        outDims[ax] = lt;
+        return new Tensor(new Shape(outDims), a.DType, Device, handle: dst);
+    }
+
     public void Dispose() { }
 }
