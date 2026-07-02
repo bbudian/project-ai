@@ -67,7 +67,9 @@
     // Build the static shell: rail + main(topbar + view container) + bottom tabs.
     buildShell: function () {
       var viewContainer = el('div', { class: 'pa-view', dataset: { role: 'view' } });
-      var topbar = el('div', { class: 'pa-topbar', dataset: { role: 'topbar' } });
+      // Host only — C.topBar() supplies the actual '.pa-topbar' node. Putting the class here too double-nests the
+      // bar (shrunk inner flexbox → header actions cluster next to the title instead of right-aligning).
+      var topbar = el('div', { dataset: { role: 'topbar' } });
       var main = el('div', { class: 'pa-main' }, topbar, viewContainer);
 
       var railHost = el('div', { dataset: { role: 'rail' } });   // holds navRail (re-rendered)
@@ -80,26 +82,87 @@
       app.refreshNav();
     },
 
+    // Local-server lifecycle (the rail Server panel). A browser can't spawn
+    // processes, so Live renders the same UI with Start explicitly disabled;
+    // Mock simulates the client's start flow (spawn → poll → connected).
+    _serverSim: { starting: false, owns: false },
+
+    onServerToggle: function () {
+      var sim = app._serverSim;
+      if (!PA.config.useMock) return; // Live: the button is disabled anyway
+      if (sim.starting) return;
+      if (sim.owns) {
+        sim.owns = false;
+        app.refreshNav();
+        app.refreshHealth();
+        return;
+      }
+      sim.starting = true;
+      app.refreshNav();
+      setTimeout(function () {
+        sim.starting = false;
+        sim.owns = true;
+        app.refreshNav();
+        app.refreshHealth(); // "the server came online" — re-probe
+      }, 2000);
+    },
+
+    openSettings: function () {
+      if (PA.settingsModal) PA.settingsModal.open();
+    },
+
     // (Re)render the nav rail + bottom tabs from the current registry + route.
     refreshNav: function () {
       var views = orderedViews();
       var active = app._route;
-      PA.ui.mount(app._els.railHost, C.navRail(views, active, app.go));
-      PA.ui.mount(app._els.tabsHost, C.bottomTabs(views, active, app.go));
-      app.refreshConnControls(); // update the rail status line
+      var sim = app._serverSim;
+      PA.ui.mount(app._els.railHost, C.navRail(views, active, app.go, {
+        onSettings: app.openSettings,
+        server: {
+          url: PA.config.baseUrl,
+          onUrl: function (v) {
+            PA.config.baseUrl = (v || '').trim() || PA.config.baseUrl;
+            PA.saveConfig();
+          },
+          onCheck: function () { app.refreshHealth(); },
+          onToggle: app.onServerToggle,
+          starting: sim.starting,
+          owns: sim.owns,
+          startDisabled: !PA.config.useMock && !sim.owns,
+          startTooltip: !PA.config.useMock
+            ? 'a browser can’t spawn processes — run `projectai serve`'
+            : null,
+        },
+      }));
+      PA.ui.mount(app._els.tabsHost, C.bottomTabs(views, active, app.go, app.openSettings));
+      app.refreshConnControls(); // update the Server panel status line
     },
 
-    // Update the rail's connection status line from the store.
+    // Update the rail Server panel's status line from the store (client's
+    // ConnectionPanel wording: "Connected ✓ — N models, M backends" / error).
     refreshConnControls: function () {
       var s = PA.store.get();
-      var dot = app._els.railHost.querySelector('[data-role="status-dot"]');
-      var txt = app._els.railHost.querySelector('[data-role="status-text"]');
-      if (!dot || !txt) return;
-      dot.className = 'pa-status-dot ' + (s.connected ? 'is-on' : (s.connError ? 'is-off' : ''));
-      if (PA.config.useMock) txt.textContent = 'Mock data';
-      else if (s.connected) txt.textContent = 'Connected';
-      else if (s.connError) txt.textContent = 'Server offline';
-      else txt.textContent = 'Not connected';
+      var txt = app._els.railHost.querySelector('[data-role="server-status"]');
+      if (!txt) return;
+      var tone = '';
+      var msg;
+      if (app._serverSim.starting) {
+        msg = 'Starting the server — loading the model…';
+        tone = 'is-good';
+      } else if (s.connected) {
+        var backends = (s.backends || []).filter(function (b) { return b.available; }).length;
+        var nModels = (s.models || []).length;
+        msg = 'Connected ✓  —  ' + nModels + ' model' + (nModels === 1 ? '' : 's') +
+          ', ' + backends + ' backend' + (backends === 1 ? '' : 's');
+        tone = 'is-good';
+      } else if (s.connError) {
+        msg = s.connError;
+        tone = 'is-bad';
+      } else {
+        msg = 'Not connected';
+      }
+      txt.textContent = msg;
+      txt.className = 'pa-rail-server-status' + (tone ? ' ' + tone : '');
     },
 
     // Navigate by setting the hash; the hashchange handler drives route().
@@ -164,6 +227,7 @@
           PA.store.set({
             health: h,
             models: h.models || [],
+            modelInfos: h.modelInfos || [],
             backends: h.backends || [],
             sizes: h.sizes || [],
             selectedModel: PA.store.get().selectedModel || h.default || (h.models && h.models[0]) || null,
@@ -204,6 +268,7 @@
         if (!btn) return;
         PA.config.useMock = btn.dataset.value === 'mock';
         PA.saveConfig();
+        app._serverSim = { starting: false, owns: false }; // the simulated server belongs to Mock only
         app.syncHarnessControls();
         app.refreshHealth();      // re-probe with the new provider
         app.route(app._route);    // re-render active view against new data source

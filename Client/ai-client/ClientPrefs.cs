@@ -18,6 +18,13 @@ public sealed class ClientPrefs
     public bool Memory { get; set; }                  // memory opt-in rides the chat start frame (P1b)
     public ulong Seed { get; set; }
     public string LastView { get; set; } = ViewIds.Chat;
+
+    // ---- local server lifecycle (the app can spawn `projectai serve` itself) ----
+    public string ServerExePath { get; set; } = "";   // "" = auto-discover from the repo/exported layout
+    public string ServerModelsDir { get; set; } = ""; // "" = auto-discover <repo>/checkpoints
+    public string ServerExtraArgs { get; set; } = "--backend torch --device cuda";
+    public bool AutoStartServer { get; set; }         // spawn on launch when the server is unreachable
+    public bool StopServerOnExit { get; set; } = true; // kill a server WE started when the app closes
 }
 
 public static class PrefsStore

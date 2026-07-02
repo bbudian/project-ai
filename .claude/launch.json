@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "prototype",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$root='C:\\Users\\bbudi\\Development\\Apps\\project-ai\\prototype'; $l=New-Object System.Net.HttpListener; $l.Prefixes.Add('http://localhost:5500/'); $l.Start(); Write-Host 'serving prototype on 5500'; $mime=@{'.html'='text/html';'.css'='text/css';'.js'='text/javascript';'.json'='application/json'}; while($l.IsListening){ try{$c=$l.GetContext()}catch{break}; $p=$c.Request.Url.AbsolutePath.TrimStart('/'); if(-not $p){$p='index.html'}; $f=Join-Path $root ($p -replace '/','\\'); try{ if((Test-Path $f -PathType Leaf) -and ([IO.Path]::GetFullPath($f)).StartsWith($root)){ $b=[IO.File]::ReadAllBytes($f); $e=[IO.Path]::GetExtension($f).ToLower(); if($mime.ContainsKey($e)){$c.Response.ContentType=$mime[$e]}; $c.Response.ContentLength64=$b.Length; $c.Response.OutputStream.Write($b,0,$b.Length) } else { $c.Response.StatusCode=404 } }catch{ $c.Response.StatusCode=500 }; try{$c.Response.Close()}catch{} }"
+      ],
+      "port": 5500
+    }
+  ]
+}

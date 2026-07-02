@@ -1,5 +1,5 @@
-/* ============================================================================
-   shell.css — the RESPONSIVE app shell (nav rail / bottom tabs / main column /
+﻿/* ============================================================================
+   shell.css â€” the RESPONSIVE app shell (nav rail / bottom tabs / main column /
    top bar) and the harness toolbar. Uses ONLY var(--pa-*).
 
    Desktop (>640px): left labeled nav rail + main column.
@@ -75,21 +75,34 @@ body { height: 100vh; margin: 0; display: flex; flex-direction: column; }
 .pa-nav-item:hover { background: var(--pa-hover); color: var(--pa-text); }
 .pa-nav-item.is-active {
   background: var(--pa-accent-soft);
-  color: var(--pa-text);
+  color: var(--pa-accent); /* the client's RailButton active treatment: accent text, not just a tinted bg */
 }
 .pa-nav-item.is-active .ti { color: var(--pa-accent); }
 
-.pa-rail-foot {
+/* Bottom block of the rail: the Settings gear pinned above the Server panel. */
+.pa-rail-bottom {
   margin-top: auto;
-  padding: var(--pa-sp-3) var(--pa-sp-3) 0;
-  border-top: 1px solid var(--pa-border);
+  display: flex; flex-direction: column; gap: var(--pa-sp-2);
+  padding-top: var(--pa-sp-3);
+}
+
+/* The Server panel (rail footer) â€” mirrors the client's ConnectionPanel:
+   URL input, Check connection, Start/Stop local server, status line. */
+.pa-rail-server {
+  background: var(--pa-panel);
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius-lg);
+  padding: var(--pa-sp-3);
+  display: flex; flex-direction: column; gap: var(--pa-sp-2);
+}
+.pa-rail-server .pa-input { font-size: var(--pa-fs-sm); }
+.pa-rail-server-status {
   font-size: var(--pa-fs-xs);
   color: var(--pa-muted);
-  display: flex; align-items: center; gap: var(--pa-sp-2);
+  white-space: normal; word-break: break-word;
 }
-.pa-status-dot { width: 8px; height: 8px; border-radius: var(--pa-radius-pill); background: var(--pa-muted); flex: 0 0 auto; }
-.pa-status-dot.is-on  { background: var(--pa-good); }
-.pa-status-dot.is-off { background: var(--pa-bad); }
+.pa-rail-server-status.is-good { color: var(--pa-good); }
+.pa-rail-server-status.is-bad  { color: var(--pa-bad); }
 
 /* --- Main column ---------------------------------------------------------- */
 .pa-main {
@@ -143,7 +156,7 @@ body { height: 100vh; margin: 0; display: flex; flex-direction: column; }
   .pa-grid-2, .pa-grid-3, .pa-grid-auto { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* Forced mobile (device toggle) — mirrors the media query and adds a phone frame. */
+/* Forced mobile (device toggle) â€” mirrors the media query and adds a phone frame. */
 html.force-mobile .pa-shell { flex-direction: column; }   /* stack main over the bottom tab bar */
 html.force-mobile .pa-rail { display: none; }
 html.force-mobile .pa-tabs {
@@ -171,45 +184,21 @@ html.force-mobile #app {
 }
 
 /* ============================================================================
-   Settings view layout — a narrow section list + a flexible pane. Collapses to
-   a single stacked column on mobile (media query + forced-mobile), like the
-   .pa-grid* utilities. Colors come only from var(--pa-*).
+   View-specific responsive layouts. Colors come only from var(--pa-*).
    ========================================================================== */
-.pa-settings-grid {
+
+/* Memory: a flexible catalog column + a fixed 400px preview/inject column
+   (matches the client's MemoryView split). Collapses to one column on mobile. */
+.pa-memory-grid {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 400px;
   gap: var(--pa-sp-4);
   align-items: start;
 }
-.pa-settings-list { padding: var(--pa-sp-2); }
-.pa-settings-pane { min-width: 0; display: flex; flex-direction: column; gap: var(--pa-sp-4); }
-
-.pa-section-item {
-  display: flex; align-items: center; gap: var(--pa-sp-3);
-  width: 100%; text-align: left;
-  padding: var(--pa-sp-2) var(--pa-sp-3);
-  border: none; background: transparent;
-  border-radius: var(--pa-radius);
-  color: var(--pa-muted);
-  transition: background 0.12s ease, color 0.12s ease;
-}
-.pa-section-item .ti { font-size: 18px; width: 20px; text-align: center; flex: 0 0 auto; }
-.pa-section-item:hover { background: var(--pa-hover); color: var(--pa-text); }
-.pa-section-item.is-active { background: var(--pa-accent-soft); color: var(--pa-text); }
-.pa-section-item.is-active .ti { color: var(--pa-accent); }
-.pa-section-name { font-weight: 600; color: var(--pa-text); }
-
-/* Masked secret display — never holds a real key, just dots. */
-.pa-key-mask {
-  padding: var(--pa-sp-1) var(--pa-sp-3);
-  background: var(--pa-input);
-  border: 1px solid var(--pa-border);
-  border-radius: var(--pa-radius);
-  color: var(--pa-muted);
-  letter-spacing: 0.06em;
-}
 
 @media (max-width: 640px) {
-  .pa-settings-grid { grid-template-columns: minmax(0, 1fr); }
+  .pa-memory-grid { grid-template-columns: minmax(0, 1fr); }
+  .pa-composer-pickers { grid-template-columns: minmax(0, 1fr); }
 }
-html.force-mobile .pa-settings-grid { grid-template-columns: minmax(0, 1fr); }
+html.force-mobile .pa-memory-grid { grid-template-columns: minmax(0, 1fr); }
+html.force-mobile .pa-composer-pickers { grid-template-columns: minmax(0, 1fr); }

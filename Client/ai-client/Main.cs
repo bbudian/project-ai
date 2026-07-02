@@ -9,7 +9,9 @@ public partial class Main : Control
 {
     private IApiClient _api;
     private AppState _state;
+    private ServerController _server;
     private Godot.Timer _prefsSaveTimer;
+    private bool _autoStartTried;
 
     public override void _Ready()
     {
@@ -38,8 +40,9 @@ public partial class Main : Control
 
     public override void _Notification(int what)
     {
-        // Flush a pending debounced save on app close so the last edit isn't lost.
-        if (what == NotificationWMCloseRequest && _state != null) PrefsStore.Save(_state.Prefs);
+        if (what != NotificationWMCloseRequest) return;
+        _server?.OnAppClosing();                          // a server we spawned dies with the app (pref-controlled)
+        if (_state != null) PrefsStore.Save(_state.Prefs); // flush a pending debounced save so the last edit isn't lost
     }
 
     private void BuildShell()
@@ -62,6 +65,23 @@ public partial class Main : Control
         connection.UrlEdited += url => _state.SetServerUrl(url);
         connection.CheckRequested += () => _api.CheckHealth();
         rail.AddFooter(connection);
+
+        // The app can run the server itself: Start spawns `projectai serve`, the controller polls /health until it
+        // answers, and the panel narrates the lifecycle. Auto-start (pref) kicks in on the first failed health probe.
+        _server = new ServerController(_state, _api);
+        AddChild(_server);
+        connection.StartServerRequested += _server.Start;
+        connection.StopServerRequested += _server.Stop;
+        _server.Changed += () => connection.SetServerState(_server.Starting, _server.OwnsRunningServer, _server.Error);
+        _state.HealthChanged += () =>
+        {
+            if (_state.Health is { Ok: false } && _state.Prefs.AutoStartServer && !_autoStartTried
+                && !_server.Starting && !_server.OwnsRunningServer)
+            {
+                _autoStartTried = true; // once per launch — a dead server shouldn't respawn in a loop
+                _server.Start();
+            }
+        };
 
         var settings = new SettingsWindow(_state, _api);
         AddChild(settings);

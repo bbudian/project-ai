@@ -1,92 +1,153 @@
 /* ============================================================================
-   views/benchmark.js — the Benchmark screen.
+   views/benchmark.js — the Benchmark screen, 1:1 with the Godot client
+   (Ui/Views/BenchmarkView.cs): three topbar tabs.
 
-   Self-registers via PA.registerView('benchmark', {...}). Builds DOM ONLY with
-   PA.ui + PA.components + the token-driven CSS classes, and fetches ONLY through
-   PA.data() (never fetch/PA.api/PA.mock). Grids use .pa-grid* so they collapse
-   to one column on mobile.
+   Define  — suite (GET /benchmark/suites → "id — N cases + bpb"), model
+             MULTI-select from health, backend, repeats (1-20, default 3), the
+             rigor caption, Run (POST /benchmark → 202 {runId,total}) + Cancel
+             (POST /benchmark/cancel), and a progress bar fed by polling
+             GET /benchmark/status (nested under 'bench' — the seam unwraps).
+             On done: auto-load the run and switch to Compare.
+   Compare — run title; aggregates table (model / bpb ↓ / median tok/s / check
+             pass / n) with the best bpb + best tok/s tinted good; the case
+             grid (rows = cases, one column per model); clicking a case row
+             opens the side-by-side outputs modal. Cells with caseId '__bpb__'
+             are bookkeeping and skipped.
+   Reports — past runs from GET /benchmark/runs; click loads into Compare.
 
-   IA: a run-config row (suite, multi-model, backend, decoding+seed, memory) +
-   a Run button → per-model summary metric cards (tok/s, p50 latency, pass rate)
-   + a case-by-case comparison table (case | per-model output+metrics, with
-   pass/fail + judge badges) + Generate report / Export + a report-path hint.
-
-   Relies on the seam method PA.data().bench(req) — Mock returns a canned
-   comparison; the Live endpoint rejects until the server ships it, and we
-   surface that rejection as an error empty-state.
+   Rigor is baked in: greedy decoding, fixed seed — NO judge, NO temperature.
    ========================================================================== */
 (function (PA) {
   var el = PA.ui.el;
   var ui = PA.ui;
   var C = PA.components;
 
-  // Suites the harness can request (label-only; the seam takes the id).
-  var SUITES = [
-    { id: 'smoke', label: 'Smoke (4 cases)' },
-    { id: 'reasoning', label: 'Reasoning' },
-    { id: 'coding', label: 'Coding' },
-    { id: 'full', label: 'Full suite' },
-  ];
-
-  // A single view-scoped config object; the render closure reads/writes it and
-  // re-renders in place so nothing leaks into the global store.
-  function initialConfig(store) {
-    var s = store.get();
-    var models = (s.models || []).slice();
-    return {
-      suite: 'smoke',
-      // Preselect up to two models for an A/B comparison.
-      models: models.slice(0, Math.min(2, models.length)),
-      backend: s.selectedBackend || (s.backends && s.backends[0] && s.backends[0].id) || 'cpu',
-      temperature: 0.7,
-      seed: 0,
-      memory: false,
-    };
-  }
-
   PA.registerView('benchmark', {
     title: 'Benchmark',
     icon: 'chart-bar',
-    order: 4,
+    order: 3,
+
     render: function (root, ctx) {
-      var store = ctx.store;
-      var cfg = initialConfig(store);
+      // ---- view-local state -------------------------------------------------
+      var tab = 0;               // 0 Define, 1 Compare, 2 Reports
+      var suites = [];           // [{id,label,caseCount,hasCorpus}]
+      var runs = [];             // past-run summaries
+      var current = null;        // loaded run detail (Compare)
+      var running = false;
+      var polling = null;
+      var cfg = { suite: null, models: [], backend: null, repeats: 3 };
 
-      // --- view state (results / status) ------------------------------------
-      var state = {
-        running: false,
-        error: null,
-        result: null,       // last bench() payload
-        reported: false,    // whether "Generate report" has been pressed
-      };
+      var st0 = ctx.store.get();
+      cfg.backend = st0.selectedBackend || null;
+      if (st0.selectedModel) cfg.models = [st0.selectedModel];
 
-      // Right-side topbar action: quick Run mirror.
-      var runBtnTop = C.button('Run benchmark', {
-        primary: true, icon: 'player-play', small: true, onClick: run,
+      var progress = C.progress();
+
+      // ---- topbar tabs --------------------------------------------------------
+      var tabBtns = ['Define', 'Compare', 'Reports'].map(function (label, i) {
+        var b = C.button(label, { ghost: true, small: true, onClick: function () { showTab(i); } });
+        return b;
       });
-      ctx.setTopBar('Benchmark', runBtnTop);
 
-      // Root layout: config card, then a results host we re-render into.
-      var resultsHost = el('div', { dataset: { role: 'bench-results' } });
-      ui.append(root, [buildConfigCard(), el('div', { class: 'pa-mt-4' }, resultsHost)]);
-      renderResults();
+      function markTabs() {
+        tabBtns.forEach(function (b, i) {
+          b.style.color = i === tab ? 'var(--pa-accent)' : '';
+        });
+      }
+      ctx.setTopBar('Benchmark', tabBtns);
 
-      // ====================================================================
-      // Run-config card
-      // ====================================================================
-      function buildConfigCard() {
-        var s = store.get();
-        var backends = s.backends || [];
+      function showTab(i) {
+        tab = i;
+        markTabs();
+        paint();
+      }
+
+      // ---- polling ---------------------------------------------------------------
+      function startPolling() {
+        if (polling) return;
+        polling = setInterval(pollStatus, 1500);
+      }
+      function stopPolling() {
+        if (polling) { clearInterval(polling); polling = null; }
+      }
+
+      function pollStatus() {
+        ctx.data().benchStatus().then(function (s) {
+          if (!root.isConnected) { stopPolling(); return; }
+          applyStatus(s);
+        }).catch(function (e) {
+          progress.setStatus('Error: ' + (e.message || e), 'bad');
+        });
+      }
+
+      function applyStatus(s) {
+        switch (s.state) {
+          case 'running':
+            if (!running) { running = true; startPolling(); paint(); } // a run may already be live (started elsewhere)
+            progress.set(s.total > 0 ? 100 * s.done / s.total : 0);
+            progress.setStatus(s.done + '/' + s.total + '  ·  ' + s.currentModel + ' · ' + s.currentCase, 'muted');
+            break;
+          case 'done':
+          case 'canceled':
+          case 'error':
+            if (!running) break;
+            running = false;
+            stopPolling();
+            progress.set(s.state === 'done' ? 100 : 0);
+            progress.setStatus(s.state === 'error' ? 'Error: ' + (s.error || 'run failed') : 'Run ' + s.state + '.',
+              s.state === 'error' ? 'bad' : 'good');
+            loadRuns();
+            if (s.state === 'done' && s.runId) {
+              loadRun(s.runId);       // auto-open the finished run …
+            } else {
+              paint();
+            }
+            break;
+        }
+      }
+
+      // ---- data loads ---------------------------------------------------------------
+      function loadSuites() {
+        ctx.data().benchSuites().then(function (list) {
+          suites = list || [];
+          if (!cfg.suite && suites.length) cfg.suite = suites[0].id;
+          if (root.isConnected && tab === 0) paint();
+        }).catch(function () { suites = []; });
+      }
+
+      function loadRuns() {
+        ctx.data().benchRuns().then(function (list) {
+          runs = list || [];
+          if (root.isConnected && tab === 2) paint();
+        }).catch(function () { runs = []; });
+      }
+
+      function loadRun(id) {
+        ctx.data().benchRun(id).then(function (run) {
+          current = run;
+          showTab(1); // … and switch to Compare
+        }).catch(function (e) {
+          current = { error: e.message || String(e) };
+          showTab(1);
+        });
+      }
+
+      // ---- Define tab -------------------------------------------------------------
+      function buildDefine() {
+        var s = ctx.store.get();
         var models = s.models || [];
+        var backends = s.backends || [];
 
-        // Suite picker.
         var suiteSel = el('select', { class: 'pa-select', onChange: function (e) { cfg.suite = e.target.value; } },
-          SUITES.map(function (su) {
-            return el('option', { value: su.id, text: su.label, selected: su.id === cfg.suite });
+          (suites.length ? suites : [{ id: 'baseline', label: '', caseCount: 0, hasCorpus: false }]).map(function (su) {
+            return el('option', {
+              value: su.id,
+              text: su.id + ' — ' + su.caseCount + ' cases' + (su.hasCorpus ? ' + bpb' : ''),
+              selected: su.id === cfg.suite,
+            });
           })
         );
 
-        // Multi-model select (native multiple). Empty catalog → a hint.
         var modelSel;
         if (models.length) {
           modelSel = el('select', {
@@ -98,13 +159,13 @@
           }, models.map(function (m) {
             return el('option', { value: m, text: m, selected: cfg.models.indexOf(m) >= 0 });
           }));
+          modelSel.title = 'Ctrl/Shift-click to select several models — the whole point is comparing.';
         } else {
-          modelSel = el('div', { class: 'pa-muted pa-sm', text: 'No models loaded — connect or switch to Mock.' });
+          modelSel = el('div', { class: ['pa-sm', 'pa-muted'], text: 'No models loaded — connect or switch to Mock.' });
         }
 
-        // Backend picker.
         var backendSel = el('select', { class: 'pa-select', onChange: function (e) { cfg.backend = e.target.value; } },
-          (backends.length ? backends : [{ id: cfg.backend, label: cfg.backend, available: true }]).map(function (b) {
+          (backends.length ? backends : [{ id: '', label: '(server default)', available: true }]).map(function (b) {
             return el('option', {
               value: b.id,
               text: b.label + (b.available === false ? ' — unavailable' : ''),
@@ -114,238 +175,192 @@
           })
         );
 
-        // Decoding: temperature + seed.
-        var tempInput = el('input', {
-          class: 'pa-input', type: 'number', min: '0', max: '2', step: '0.1', value: String(cfg.temperature),
-          onChange: function (e) { cfg.temperature = clampNum(e.target.value, 0, 2, cfg.temperature); e.target.value = String(cfg.temperature); },
+        var repeatsInput = el('input', {
+          class: 'pa-input', type: 'number', min: '1', max: '20', step: '1', value: String(cfg.repeats),
+          onChange: function (e) {
+            var v = Number(e.target.value);
+            cfg.repeats = (!isNaN(v) && v >= 1 && v <= 20) ? Math.round(v) : 3;
+            e.target.value = String(cfg.repeats);
+          },
         });
-        var seedInput = el('input', {
-          class: 'pa-input', type: 'number', min: '0', step: '1', value: String(cfg.seed),
-          onChange: function (e) { cfg.seed = clampNum(e.target.value, 0, 2147483647, cfg.seed); e.target.value = String(cfg.seed); },
+
+        var runBtn = C.button('Run benchmark', { primary: true, disabled: running, onClick: onRun });
+        var cancelBtn = C.button('Cancel', {
+          ghost: true,
+          onClick: function () { ctx.data().benchCancel().catch(function () {}); },
         });
+        if (!running) cancelBtn.classList.add('pa-hidden');
 
-        // Memory on/off toggle.
-        var memToggle = C.toggle(cfg.memory, function (on) { cfg.memory = on; }, ['Off', 'On']);
-
-        var grid = el('div', { class: 'pa-grid pa-grid-3' },
-          C.field('Suite', suiteSel, 'Which comparison set to run'),
-          C.field('Backend', backendSel, 'Compute backend for every model'),
-          C.field('Models', modelSel, 'Select two or more to compare'),
-          C.field('Temperature', tempInput, 'Decoding temperature (0–2)'),
-          C.field('Seed', seedInput, 'Reproducible sampling seed'),
-          C.field('Memory', memToggle, 'Inject recalled memories into prompts')
-        );
-
-        var runBtn = C.button('Run benchmark', { primary: true, icon: 'player-play', onClick: run });
-
-        return el('div', { class: 'pa-card' },
-          el('div', { class: 'pa-row pa-wrap' },
-            el('div', { class: 'pa-grow' },
-              el('div', { class: 'pa-h3', text: 'Run configuration' }),
-              el('div', { class: 'pa-muted pa-sm', text: 'Compare models across a suite, then export a report.' })
-            ),
-            runBtn
-          ),
-          el('div', { class: 'pa-mt-4' }, grid)
+        return el('div', { class: 'pa-card pa-col pa-gap-4' },
+          el('div', { class: 'pa-h3', text: 'Run configuration' }),
+          C.field('Suite', suiteSel),
+          C.field('Models', modelSel),
+          C.field('Backend', backendSel),
+          C.field('Repeats', repeatsInput),
+          el('div', { class: ['pa-xs', 'pa-muted'], text:
+            'Greedy decoding, fixed seed, median over repeats with one discarded warmup — held constant across models.' }),
+          el('div', { class: 'pa-row pa-gap-3' }, runBtn, cancelBtn),
+          progress.root
         );
       }
 
-      // ====================================================================
-      // Run — through the seam only.
-      // ====================================================================
-      function run() {
-        if (state.running) return;
-        if (!cfg.models || cfg.models.length < 1) {
-          state.error = 'Select at least one model to benchmark.';
-          state.result = null;
-          renderResults();
-          return;
-        }
-        state.running = true;
-        state.error = null;
-        state.reported = false;
-        setRunBusy(true);
-        renderResults();
-
-        ctx.data().bench({
-          suite: cfg.suite,
+      function onRun() {
+        if (running) return;
+        if (!cfg.models.length) { progress.setStatus('Select at least one model.', 'bad'); return; }
+        // Claim the run BEFORE the round-trip (the client disables its Run button first too):
+        // a double-click must not fire a second POST that 409s over the first one's progress.
+        running = true;
+        paint();
+        progress.set(0);
+        progress.setStatus('Starting…', 'muted');
+        ctx.data().benchStart({
+          suite: cfg.suite || 'baseline',
           models: cfg.models.slice(),
-          backend: cfg.backend,
-          memory: cfg.memory,
-          decoding: { temperature: cfg.temperature, seed: cfg.seed },
-        }).then(function (res) {
-          state.running = false;
-          state.result = res;
-          state.error = null;
-          setRunBusy(false);
-          renderResults();
-        }).catch(function (err) {
-          state.running = false;
-          state.result = null;
-          state.error = (err && err.message) || String(err);
-          setRunBusy(false);
-          renderResults();
+          backend: cfg.backend || undefined,
+          repeats: cfg.repeats,
+        }).then(function (r) {
+          progress.setStatus('Running ' + r.runId + ' — 0/' + r.total, 'muted');
+          startPolling();
+        }).catch(function (e) {
+          running = false;
+          progress.setStatus('Error: ' + (e.message || e), 'bad');
+          paint();
         });
       }
 
-      function setRunBusy(busy) {
-        if (!runBtnTop) return;
-        runBtnTop.disabled = !!busy;
-      }
-
-      // ====================================================================
-      // Results region
-      // ====================================================================
-      function renderResults() {
-        var nodes;
-
-        if (state.running) {
-          nodes = el('div', { class: 'pa-card' },
-            el('div', { class: 'pa-row' }, ui.icon('loader-2'), el('span', { text: 'Running ' + cfg.suite + ' on ' + cfg.models.length + ' model(s)…' }))
-          );
-        } else if (state.error) {
-          nodes = C.emptyState('alert-triangle', 'Benchmark unavailable', state.error,
-            C.button('Retry', { onClick: run, icon: 'refresh' }));
-        } else if (!state.result) {
-          nodes = C.emptyState('chart-bar', 'No benchmark yet',
-            'Pick a suite, choose models and a backend, then Run to compare them.',
-            C.button('Run benchmark', { primary: true, icon: 'player-play', onClick: run }));
-        } else {
-          nodes = [summarySection(state.result), casesSection(state.result), reportSection(state.result)];
-        }
-
-        ui.mount(resultsHost, nodes);
-      }
-
-      // --- Per-model summary metric cards -----------------------------------
-      function summarySection(res) {
-        var cards = (res.models || []).map(function (m) {
-          return el('div', { class: 'pa-card' },
-            el('div', { class: 'pa-row pa-wrap' },
-              el('span', { class: 'pa-mono pa-sm', text: m.model }),
-              el('span', { class: 'pa-spacer' }),
-              passBadge(m.passRate)
-            ),
-            el('div', { class: 'pa-grid pa-grid-3 pa-mt-3' },
-              C.metricCard('Tokens / sec', ui.fmtNum(m.tokensPerSec, 1)),
-              C.metricCard('p50 latency', ui.fmtNum(m.latencyMs, 0) + ' ms'),
-              C.metricCard('Pass rate', pct(m.passRate))
-            )
-          );
-        });
-
-        return el('div', {},
-          el('div', { class: 'pa-row pa-wrap' },
-            el('div', { class: 'pa-h3', text: 'Summary' }),
-            el('span', { class: 'pa-spacer' }),
-            C.badge(res.suite || 'suite', 'accent'),
-            C.badge(res.backend || cfg.backend, 'neutral')
-          ),
-          el('div', { class: 'pa-grid pa-grid-2 pa-mt-3' }, cards)
-        );
-      }
-
-      // --- Case-by-case comparison table ------------------------------------
-      // Columns: Case | one column per model (output + metrics + pass/judge).
-      function casesSection(res) {
-        var modelOrder = (res.models || []).map(function (m) { return m.model; });
-        if (!modelOrder.length && res.cases && res.cases[0]) {
-          modelOrder = res.cases[0].results.map(function (r) { return r.model; });
-        }
-
-        var cols = [{
-          key: 'name', label: 'Case',
-          render: function (row) { return el('span', { class: 'pa-mono pa-sm', text: row.name }); },
-        }];
-
-        modelOrder.forEach(function (model) {
-          cols.push({
-            key: model, label: model,
-            render: function (row) {
-              var r = (row.results || []).filter(function (x) { return x.model === model; })[0];
-              if (!r) return el('span', { class: 'pa-muted', text: '—' });
-              return el('div', { class: 'pa-col pa-gap-3' },
-                el('div', { class: 'pa-row pa-wrap' },
-                  C.badge(r.pass ? 'pass' : 'fail', r.pass ? 'good' : 'bad'),
-                  r.judge ? C.badge(r.judge, r.pass ? 'neutral' : 'accent') : null
-                ),
-                el('div', { class: 'pa-sm', text: ui.truncate(r.output || r.text || '', 120) }),
-                el('div', { class: 'pa-row pa-wrap pa-xs pa-muted' },
-                  el('span', { text: ui.fmtNum(r.tokensPerSec, 1) + ' tok/s' }),
-                  r.latencyMs != null ? el('span', { text: '· ' + ui.fmtNum(r.latencyMs, 0) + ' ms' }) : null
-                )
-              );
-            },
-          });
-        });
-
-        return el('div', { class: 'pa-mt-4' },
-          el('div', { class: 'pa-h3', text: 'Case comparison' }),
-          el('div', { class: 'pa-scroll pa-mt-3' }, C.table({ cols: cols, rows: res.cases || [] }))
-        );
-      }
-
-      // --- Report / export --------------------------------------------------
-      function reportSection(res) {
-        var reportPath = 'reports/bench-' + (res.suite || 'suite') + '-' + (res.backend || cfg.backend).replace(/[^\w.-]+/g, '_') + '.md';
-
-        var hint = el('div', { class: 'pa-muted pa-sm pa-mono', dataset: { role: 'report-hint' }, text: 'Report will be written to ' + reportPath });
-        hint.classList.toggle('pa-hidden', !state.reported);
-
-        var genBtn = C.button('Generate report', {
-          icon: 'file-text',
-          onClick: function () { state.reported = true; hint.classList.remove('pa-hidden'); },
-        });
-
-        var exportBtn = C.button('Export JSON', {
-          ghost: true, icon: 'download',
-          onClick: function () { exportJson(res); },
-        });
-
-        return el('div', { class: 'pa-card pa-mt-4' },
-          el('div', { class: 'pa-row pa-wrap' },
-            el('div', { class: 'pa-grow' },
-              el('div', { class: 'pa-h3', text: 'Report' }),
-              el('div', { class: 'pa-muted pa-sm', text: 'Write a Markdown summary or export the raw comparison.' })
-            ),
-            genBtn, exportBtn
-          ),
-          el('div', { class: 'pa-mt-3' }, hint)
-        );
-      }
-
-      // Client-side JSON export (no network; a pure download).
-      function exportJson(res) {
-        try {
-          var blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' });
-          var url = URL.createObjectURL(blob);
-          var a = el('a', { href: url, download: 'benchmark-' + (res.suite || 'suite') + '.json' });
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          setTimeout(function () { URL.revokeObjectURL(url); }, 0);
-        } catch (e) {
-          // Export is a nicety; never break the view over it.
-          console.warn('benchmark export failed', e);
-        }
-      }
-
-      // ---------------------------------------------------------------------
-      // small local helpers
-      // ---------------------------------------------------------------------
-      function passBadge(rate) {
-        var tone = rate == null ? 'neutral' : (rate >= 0.8 ? 'good' : (rate >= 0.5 ? 'accent' : 'bad'));
-        return C.badge(pct(rate) + ' pass', tone);
-      }
+      // ---- Compare tab ---------------------------------------------------------------
       function pct(rate) {
         if (rate == null || isNaN(rate)) return '—';
         return Math.round(Number(rate) * 100) + '%';
       }
-      function clampNum(v, lo, hi, fallback) {
-        var n = Number(v);
-        if (v === '' || isNaN(n)) return fallback;
-        return Math.min(hi, Math.max(lo, n));
+
+      function buildCompare() {
+        if (!current) {
+          return el('div', { class: ['pa-sm', 'pa-muted'], text: 'No run loaded — run a benchmark or open one from Reports.' });
+        }
+        if (current.error) {
+          return el('div', { class: ['pa-sm', 'pa-muted'], text: 'Could not load run: ' + current.error });
+        }
+
+        var frag = el('div', { class: 'pa-col pa-gap-4' });
+        frag.appendChild(el('div', { class: 'pa-sm', text: 'Run ' + current.id + '  ·  suite ' + current.suiteId + '  ·  ' + current.state }));
+
+        // Aggregates: bpb ↓ is the quality headline; every rate shows its n.
+        var aggregates = current.aggregates || [];
+        var bpbs = aggregates.map(function (a) { return a.meanBpb; }).filter(function (v) { return v != null; });
+        var bestBpb = bpbs.length ? Math.min.apply(null, bpbs) : null;
+        var toks = aggregates.map(function (a) { return a.medianTokPerSec || 0; });
+        var bestTok = toks.length ? Math.max.apply(null, toks) : 0;
+
+        var aggTable = C.table({
+          cols: [
+            { key: 'model', label: 'model', render: function (a) { return el('span', { class: 'pa-mono', style: { fontWeight: '600' }, text: a.model }); } },
+            { key: 'bpb', label: 'bpb ↓', render: function (a) {
+                var best = a.meanBpb != null && a.meanBpb === bestBpb;
+                return el('span', { class: best ? 'pa-tone-good' : '', text: a.meanBpb != null ? Number(a.meanBpb).toFixed(4) : '—' });
+            } },
+            { key: 'tok', label: 'median tok/s', render: function (a) {
+                var best = bestTok > 0 && a.medianTokPerSec === bestTok;
+                return el('span', { class: best ? 'pa-tone-good' : '', text: Number(a.medianTokPerSec || 0).toFixed(2) });
+            } },
+            { key: 'pass', label: 'check pass', render: function (a) { return pct(a.checkPassRate); } },
+            { key: 'n', label: 'n', render: function (a) { return String(a.n != null ? a.n : ''); } },
+          ],
+          rows: aggregates,
+        });
+        frag.appendChild(el('div', { class: 'pa-card' },
+          el('div', { class: ['pa-xs', 'pa-muted'], style: { marginBottom: 'var(--pa-sp-2)' }, text: 'Aggregates (bpb ↓ is the quality headline; every rate shows its n)' }),
+          el('div', { class: 'pa-scroll' }, aggTable)
+        ));
+
+        // Cases: rows = cases, one column per model; a click opens the diff modal.
+        var cells = (current.cells || []).filter(function (c) { return c.caseId !== '__bpb__'; });
+        var caseIds = [];
+        cells.forEach(function (c) { if (caseIds.indexOf(c.caseId) < 0) caseIds.push(c.caseId); });
+        var models = aggregates.map(function (a) { return a.model; });
+
+        var caseCols = [{
+          key: 'caseId', label: 'case',
+          render: function (row) { return el('span', { class: 'pa-mono', style: { fontWeight: '600' }, text: row.caseId }); },
+        }];
+        models.forEach(function (m) {
+          caseCols.push({
+            key: m, label: m,
+            render: function (row) {
+              var cell = cells.filter(function (c) { return c.caseId === row.caseId && c.model === m; })[0];
+              if (!cell) return el('span', { class: 'pa-muted', text: '—' });
+              if (cell.error) return el('span', { class: 'pa-tone-bad', text: '⚠ error' });
+              var tone = cell.checkPassRate >= 1 ? 'pa-tone-good' : cell.checkPassRate <= 0 ? 'pa-tone-bad' : '';
+              return el('span', { class: tone, text:
+                pct(cell.checkPassRate) + ' · ' + Number(cell.medianTokPerSec || 0).toFixed(1) + ' tok/s · ' + (cell.stop || '') });
+            },
+          });
+        });
+
+        var caseTable = C.table({
+          cols: caseCols,
+          rows: caseIds.map(function (id) { return { caseId: id }; }),
+          onRowClick: function (i, row) { openCaseDiff(row.caseId, cells); },
+        });
+        frag.appendChild(el('div', { class: 'pa-card' },
+          el('div', { class: ['pa-xs', 'pa-muted'], style: { marginBottom: 'var(--pa-sp-2)' }, text: 'Cases (click a row for the side-by-side outputs)' }),
+          el('div', { class: 'pa-scroll' }, caseTable)
+        ));
+
+        return frag;
       }
+
+      // The side-by-side outputs modal for one case.
+      function openCaseDiff(caseId, cells) {
+        var body = el('div', { class: 'pa-col pa-gap-4' });
+        body.appendChild(el('div', { class: 'pa-h3', text: 'Case: ' + caseId }));
+        cells.filter(function (c) { return c.caseId === caseId; }).forEach(function (cell) {
+          body.appendChild(el('div', { class: 'pa-card pa-col pa-gap-3' },
+            el('div', { class: ['pa-xs', 'pa-muted'], text:
+              cell.model + '  ·  ' + pct(cell.checkPassRate) + ' checks  ·  ' + (cell.generatedTokens || 0) + ' tok  ·  stop ' + (cell.stop || '') }),
+            el('div', { class: 'pa-sm', style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' }, text:
+              cell.error ? 'error: ' + cell.error : (cell.output && cell.output.length ? cell.output : '(no output)') })
+          ));
+        });
+        C.openModal('Case comparison', body, { wide: true });
+      }
+
+      // ---- Reports tab -----------------------------------------------------------------
+      function buildReports() {
+        var body = el('div', { class: 'pa-col pa-gap-3' });
+        if (!runs.length) {
+          body.appendChild(el('div', { class: ['pa-sm', 'pa-muted'], text: 'No runs yet — define one and hit Run.' }));
+        } else {
+          runs.forEach(function (run) {
+            body.appendChild(C.button(
+              run.id + '   ·   ' + run.suiteId + '   ·   ' + (run.models || []).join(', ') + '   ·   ' + run.backend + '   ·   ' + run.state,
+              { ghost: true, small: true, onClick: function () { loadRun(run.id); } }
+            ));
+          });
+        }
+        return el('div', { class: 'pa-card pa-col pa-gap-3' },
+          el('div', { class: 'pa-h3', text: 'Past runs' }),
+          body
+        );
+      }
+
+      // ---- paint -------------------------------------------------------------------------
+      function paint() {
+        markTabs();
+        var body = tab === 0 ? buildDefine() : tab === 1 ? buildCompare() : buildReports();
+        ui.mount(root, el('div', { class: 'pa-col pa-gap-4' }, body));
+      }
+
+      // ---- go: fetch suites/runs/status once (client's OnShown parity) ---------------------
+      paint();
+      loadSuites();
+      loadRuns();
+      pollStatus(); // a run may already be live (started elsewhere)
+
+      var unsub = ctx.store.subscribe(function () {
+        if (!root.isConnected) { unsub(); stopPolling(); return; }
+        if (tab === 0) paint(); // catalogs (models/backends) arrived
+      });
     },
   });
 })(window.PA);

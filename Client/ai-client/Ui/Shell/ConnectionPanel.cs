@@ -8,10 +8,14 @@ public partial class ConnectionPanel : PanelContainer
 {
     public event Action CheckRequested;
     public event Action<string> UrlEdited;
+    public event Action StartServerRequested;
+    public event Action StopServerRequested;
 
     private readonly AppState _state;
     private LineEdit _url;
     private Label _status;
+    private Button _serverButton;
+    private bool _ownsServer;
 
     public ConnectionPanel(AppState state) => _state = state;
 
@@ -33,6 +37,15 @@ public partial class ConnectionPanel : PanelContainer
         check.Pressed += () => CheckRequested?.Invoke();
         column.AddChild(check);
 
+        // Start/Stop a local `projectai serve` from inside the app; the label flips based on who owns the process.
+        _serverButton = new Button { Text = "Start local server" };
+        _serverButton.Pressed += () =>
+        {
+            if (_ownsServer) StopServerRequested?.Invoke();
+            else StartServerRequested?.Invoke();
+        };
+        column.AddChild(_serverButton);
+
         _status = new Label { Text = "Not connected", AutowrapMode = TextServer.AutowrapMode.WordSmart };
         _status.AddThemeColorOverride("font_color", Palette.Muted);
         _status.AddThemeFontSizeOverride("font_size", Palette.Type.Caption);
@@ -43,6 +56,16 @@ public partial class ConnectionPanel : PanelContainer
         // re-emit TextChanged, so this cannot loop.)
         _state.ServerUrlChanged += () => { if (_url.Text != _state.ServerUrl) _url.Text = _state.ServerUrl; };
         Refresh(); // render whatever state already exists (no-op before the first /health lands)
+    }
+
+    /// <summary>Renders the local-server lifecycle (driven by ServerController.Changed via Main).</summary>
+    public void SetServerState(bool starting, bool owns, string error)
+    {
+        _ownsServer = owns;
+        _serverButton.Disabled = starting;
+        _serverButton.Text = starting ? "Starting…" : owns ? "Stop local server" : "Start local server";
+        if (starting) SetStatus("Starting the server — loading the model…", error: false);
+        else if (!string.IsNullOrEmpty(error)) SetStatus(error, error: true);
     }
 
     private void Refresh()

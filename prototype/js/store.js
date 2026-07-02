@@ -7,11 +7,11 @@
     route: null,            // active view id
     health: null,           // last /health payload (raw)
     models: [],             // string[] of model names
+    modelInfos: [],         // [{name,params,layers,ctx,vocab,tokenizer,dtype,step,instruct,fileBytes,error}]
     backends: [],           // [{id,label,available,reason?}]
     sizes: [],              // [{id,label}]
     selectedModel: null,    // current chat/gen model
     selectedBackend: null,  // current backend id
-    settings: {},           // app/model/memory/benchmark settings
     connected: false,       // reached the server successfully
     connError: null,        // last connection error message
   };

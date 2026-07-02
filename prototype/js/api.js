@@ -3,8 +3,14 @@
    One method per server operation. Every call reads PA.config.baseUrl fresh,
    so switching servers via the harness toolbar takes effect immediately.
 
-   Endpoints that DO NOT EXIST on the server yet reject with a clear
-   'endpoint not on server yet — use Mock' Error so the app degrades visibly.
+   Every route below exists on the server today (ProjectAI/Server.cs):
+     GET  /health                    POST /generate         WS   /chat
+     POST /tokenize                  POST /train            GET  /train/status
+     GET  /benchmark/suites          POST /benchmark        GET  /benchmark/status
+     POST /benchmark/cancel          GET  /benchmark/runs   GET  /benchmark/run/{id}
+     GET  /memory                    GET  /memory/render    PUT  /memory
+     GET  /config                    PUT  /config
+     PUT  /config/secrets/{key}      DELETE /config/secrets/{key}
    ========================================================================== */
 (function (PA) {
   var api = {};
@@ -19,7 +25,9 @@
     return base().replace(/^http/i, 'ws');
   }
 
-  // GET/POST JSON with a timeout; throws on network / non-2xx.
+  // GET/POST/PUT/DELETE JSON with a timeout; throws on network / non-2xx.
+  // The thrown Error carries .status and .data (the parsed body — e.g. the
+  // {problems:[…]} a 400 from PUT /config returns).
   function request(method, path, body, timeoutMs) {
     var url = base() + path;
     var ctrl = new AbortController();
@@ -44,28 +52,35 @@
           return data;
         });
       })
+      .catch(function (e) {
+        // The server's CORS preflight deliberately allows only GET/POST (anti drive-by protection), so a
+        // cross-origin PUT/DELETE from this harness fails as an opaque "Failed to fetch". Name the real cause —
+        // same-UI-explicit-not-possible is the parity rule for browser-impossible actions.
+        if ((method === 'PUT' || method === 'DELETE') && e instanceof TypeError) {
+          throw new Error('cross-origin ' + method + ' writes are blocked by the server’s CORS policy — ' +
+            'use the desktop app for writes, or serve this harness from the same origin');
+        }
+        throw e;
+      })
       .finally(function () { clearTimeout(t); });
   }
 
-  // Reject helper for endpoints the server does not implement yet.
-  function notOnServer() {
-    return Promise.reject(new Error('endpoint not on server yet — use Mock'));
-  }
-
-  // === LIVE endpoints (implemented on the server) ==========================
-
-  // GET /health -> normalized { ok, models, default, backends, defaultBackend, sizes, training }
+  // === health ================================================================
+  // GET /health -> normalized { ok, models, modelInfos, default, backends,
+  //                             defaultBackend, sizes, training, bench }
   api.health = function () {
     return request('GET', '/health', undefined, 8000)
       .then(function (d) {
         return {
           ok: true,
           models: d.models || [],
+          modelInfos: d.modelInfos || [],
           default: d.default || null,
           backends: d.backends || [],
           defaultBackend: d.defaultBackend || null,
           sizes: d.sizes || [],
           training: d.training || null,
+          bench: d.bench || null,
         };
       })
       .catch(function (e) {
@@ -73,14 +88,14 @@
       });
   };
 
+  // === generate (non-streaming; chat uses the WS below) =====================
   // POST /generate -> { text, promptTokens, generatedTokens, stop, seconds, sources }
-  // req may include: prompt, model, backend, memory, user, store, research, decoding{...}
   api.generate = function (req) {
     return request('POST', '/generate', req || {}, 120000).then(function (d) {
       return {
         text: d.text || '',
-        promptTokens: d.promptTokens != null ? d.promptTokens : (d.prompt_tokens || null),
-        generatedTokens: d.generatedTokens != null ? d.generatedTokens : (d.generated_tokens || null),
+        promptTokens: d.promptTokens != null ? d.promptTokens : null,
+        generatedTokens: d.generatedTokens != null ? d.generatedTokens : null,
         stop: d.stop || null,
         seconds: d.seconds != null ? d.seconds : null,
         sources: d.sources || [],
@@ -92,13 +107,19 @@
 
   /**
    * chat(handlers) -> controller over WS /chat.
-   * handlers: { onToken(text), onSources(list), onDone(info), onError(err), onOpen(), onClose() }
+   * handlers: { onReady(info), onToken(text), onSources(list), onDone(info),
+   *             onError(err), onOpen(), onClose() }
    * Protocol:
-   *   send    {type:'start', model, backend}
-   *           {type:'message', text, ...opts}
+   *   send    {type:'start', model, backend, memory?, user?}      — memory rides
+   *           the start frame ONLY (store omitted → server defaults to the model name)
+   *           {type:'message', text, sample?, temperature?, topK?, topP?,
+   *            maxTokens?, seed?, research?}
    *           {type:'cancel'}
-   *   receive {type:'token', text} | {type:'sources', sources} |
-   *           {type:'done', ...} | {type:'error', error} | {type:'ready'}
+   *   receive {type:'ready', model, backend, instruct, contextLimit} |
+   *           {type:'token', text} | {type:'sources', items} |
+   *           {type:'done', stop, promptTokens, generatedTokens, seconds,
+   *            position, contextLimit} | {type:'error', error}
+   * Note: the server spells the cancel stop reason 'canceled'.
    * Returns { start(model,backend,opts), send(msg,opts), cancel(), close() }.
    */
   api.chat = function (handlers) {
@@ -115,11 +136,11 @@
         var msg;
         try { msg = JSON.parse(ev.data); } catch (e) { return; }
         switch (msg.type) {
+          case 'ready':   handlers.onReady && handlers.onReady(msg); break;
           case 'token':   handlers.onToken && handlers.onToken(msg.text || ''); break;
           // The server sends the list under 'items' (only POST /generate uses top-level 'sources'); accept both.
           case 'sources': handlers.onSources && handlers.onSources(msg.items || msg.sources || []); break;
-          case 'done':    handlers.onDone && handlers.onDone(msg); break;
-          case 'ready':   /* server acked start */ break;
+          case 'done':    handlers.onDone && handlers.onDone(msg); break; // the FULL done object
           case 'error':   handlers.onError && handlers.onError(new Error(msg.error || 'chat error')); break;
         }
       };
@@ -145,22 +166,30 @@
     };
   };
 
-  // POST /tokenize -> { count, tokens, decoded }
+  // === tokenize ==============================================================
+  // POST /tokenize {text, model} -> { model, vocab, count, tokens:[{id,text}], decoded }
   api.tokenize = function (req) {
     return request('POST', '/tokenize', req || {}, 15000).then(function (d) {
-      return { count: d.count != null ? d.count : (d.tokens ? d.tokens.length : 0), tokens: d.tokens || [], decoded: d.decoded || null };
+      return {
+        model: d.model || (req && req.model) || null,
+        vocab: d.vocab != null ? d.vocab : null,
+        count: d.count != null ? d.count : (d.tokens ? d.tokens.length : 0),
+        tokens: d.tokens || [],
+        decoded: d.decoded || null,
+      };
     });
   };
 
-  // POST /train -> { ok, error? }
+  // === train / status ========================================================
+  // POST /train {name, text, size, steps, backend} -> 202 {status:'started', …}
   api.train = function (req) {
-    return request('POST', '/train', req || {}, 15000).then(function (d) {
-      return { ok: d.ok !== false, error: d.error || null };
+    return request('POST', '/train', req || {}, 30000).then(function (d) {
+      return { ok: true, name: (d && d.name) || null, error: null };
     });
   };
 
-  // GET /train/status -> { training: { state, name, step, totalSteps, loss, error? } } — the server nests the
-  // payload under 'training'; unwrap before reading (tolerating a flat shape too).
+  // GET /train/status -> the payload nests under 'training'; unwrap before
+  // reading (tolerating a flat shape too).
   api.trainStatus = function () {
     return request('GET', '/train/status', undefined, 8000).then(function (raw) {
       var d = (raw && raw.training) ? raw.training : (raw || {});
@@ -168,22 +197,111 @@
         state: d.state || 'idle',
         name: d.name || null,
         step: d.step != null ? d.step : 0,
-        totalSteps: d.totalSteps != null ? d.totalSteps : (d.total_steps || 0),
+        totalSteps: d.totalSteps != null ? d.totalSteps : 0,
         loss: d.loss != null ? d.loss : null,
         error: d.error || null,
       };
     });
   };
 
-  // === Endpoints NOT on the server yet — reject clearly so Mock is used. ====
-  api.bench          = function (/* req */)   { return notOnServer(); };
-  api.benchStatus    = function ()            { return notOnServer(); };
-  api.memoryList     = function (/* q */)     { return notOnServer(); };
-  api.memoryGet      = function (/* id */)    { return notOnServer(); };
-  api.memoryPut      = function (/* draft */) { return notOnServer(); };
-  api.memorySupersede= function (/* id */)    { return notOnServer(); };
-  api.settingsGet    = function ()            { return notOnServer(); };
-  api.settingsPut    = function (/* patch */) { return notOnServer(); };
+  // === benchmark =============================================================
+  // GET /benchmark/suites -> [{id,label,caseCount,hasCorpus}]
+  api.benchSuites = function () {
+    return request('GET', '/benchmark/suites', undefined, 8000).then(function (d) {
+      return (d && d.suites) || [];
+    });
+  };
+
+  // POST /benchmark {suite, models, backend, repeats} -> 202 { runId, total }
+  api.benchStart = function (req) {
+    return request('POST', '/benchmark', req || {}, 15000).then(function (d) {
+      return { runId: (d && d.runId) || '', total: (d && d.total) || 0 };
+    });
+  };
+
+  // GET /benchmark/status -> the payload nests under 'bench'; unwrap.
+  api.benchStatus = function () {
+    return request('GET', '/benchmark/status', undefined, 8000).then(function (raw) {
+      var d = (raw && raw.bench) ? raw.bench : (raw || {});
+      return {
+        state: d.state || 'idle',
+        runId: d.runId || '',
+        suite: d.suite || '',
+        done: d.done != null ? d.done : 0,
+        total: d.total != null ? d.total : 0,
+        currentModel: d.currentModel || '',
+        currentCase: d.currentCase || '',
+        error: d.error || null,
+      };
+    });
+  };
+
+  // POST /benchmark/cancel -> { ok }
+  api.benchCancel = function () {
+    return request('POST', '/benchmark/cancel', {}, 8000).then(function () { return { ok: true }; });
+  };
+
+  // GET /benchmark/runs -> [{id,suiteId,models,backend,startedUtc,state,cases}]
+  api.benchRuns = function () {
+    return request('GET', '/benchmark/runs', undefined, 8000).then(function (d) {
+      return (d && d.runs) || [];
+    });
+  };
+
+  // GET /benchmark/run/{id} -> the camelCased run:
+  // { id, suiteId, state, aggregates:[{model,n,meanBpb|null,medianTokPerSec,checkPassRate}],
+  //   cells:[{model,caseId,output,generatedTokens,stop,medianTokPerSec,checkPassRate,error}] }
+  // (Consumers skip cells with caseId '__bpb__' — bookkeeping, not a case.)
+  api.benchRun = function (id) {
+    return request('GET', '/benchmark/run/' + encodeURIComponent(id), undefined, 15000);
+  };
+
+  // === memory ================================================================
+  // The user is always the fixed single-local-user 'default' (client parity).
+  function memoryQuery(req) {
+    req = req || {};
+    return '?user=default&store=' + encodeURIComponent(req.store || 'default') +
+      (req.q ? '&q=' + encodeURIComponent(req.q) : '');
+  }
+
+  // GET /memory?user=default&store=&q= ->
+  // { user, store, count, memories:[{id,title,keys,tier,trust,score,asof}] }
+  api.memoryList = function (req) {
+    return request('GET', '/memory' + memoryQuery(req), undefined, 8000);
+  };
+
+  // GET /memory/render?user=default&store=&q= -> { user, store, bridge, recall }
+  api.memoryRender = function (req) {
+    return request('GET', '/memory/render' + memoryQuery(req), undefined, 8000);
+  };
+
+  // PUT /memory {title, keys, body, tier, trust, user:'default', store} -> { id }
+  api.memoryPut = function (draft) {
+    return request('PUT', '/memory', draft || {}, 8000);
+  };
+
+  // === config + secrets ======================================================
+  // GET /config -> { memory:{bridgeCards,bridgeBudget,recallHits,recallBudget},
+  //                  secrets:[{key,set,hint,source}] }
+  api.configGet = function () {
+    return request('GET', '/config', undefined, 8000);
+  };
+
+  // PUT /config {memory:{…}} — partial update; echoes the applied state.
+  // A 400 rejects with err.data = { problems:[…] }.
+  api.configPut = function (patch) {
+    return request('PUT', '/config', patch || {}, 8000);
+  };
+
+  // PUT /config/secrets/{key} {value} -> masked status { key, set, hint, source }
+  api.secretPut = function (key, value) {
+    return request('PUT', '/config/secrets/' + encodeURIComponent(key), { value: value }, 8000);
+  };
+
+  // DELETE /config/secrets/{key} -> masked status { key, set, hint, source }
+  api.secretDelete = function (key) {
+    return request('DELETE', '/config/secrets/' + encodeURIComponent(key), undefined, 8000);
+  };
 
   PA.api = api;
 })(window.PA);

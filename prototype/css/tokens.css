@@ -26,6 +26,7 @@
   --pa-accent-line:  rgba(201, 100, 66, 0.45);
   --pa-good-soft:    rgba(130, 182, 130, 0.16);
   --pa-bad-soft:     rgba(224, 114, 110, 0.16);
+  --pa-backdrop:     rgba(0, 0, 0, 0.55);      /* modal overlay dim */
 
   /* --- Spacing scale --- */
   --pa-sp-1: 4px;
@@ -81,5 +82,6 @@
   --pa-accent-line: rgba(201, 100, 66, 0.40);
   --pa-good-soft:   rgba(63, 143, 91, 0.14);
   --pa-bad-soft:    rgba(192, 64, 60, 0.14);
+  --pa-backdrop:    rgba(0, 0, 0, 0.35);
   --pa-shadow:      0 1px 3px rgba(0, 0, 0, 0.12);
 }

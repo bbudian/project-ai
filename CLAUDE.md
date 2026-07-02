@@ -85,6 +85,10 @@ One concern per project. Every arrow in the table is a *compile-time* `ProjectRe
 - Data-oriented inner loops: `Span<T>`, SIMD, `TensorPrimitives`. Allocate off the hot path.
 - Nullable enabled; analyzers on. Prefer immutable `record` configs (`ModelConfig`, `TrainingConfig`).
 - Determinism: fixed seeds, centralized tolerances, a reference comparison for every numeric op.
+- **Client ⇄ mockup parity (1:1):** `Client/ai-client` (the shipping Godot app) and `prototype/` (the web design
+  harness) must stay in lockstep — any UI or behavior change in one lands in the other **in the same change set**:
+  screens, nav order, controls, wire fields, and states. If a divergence is unavoidable (e.g. a browser can't spawn
+  a process), the harness shows the same UI with an explicit "not possible here" state, never a missing feature.
 
 ## Build & test
 ```

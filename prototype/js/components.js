@@ -8,9 +8,15 @@
   var icon = PA.ui.icon;
   var C = {};
 
-  // --- navRail(views, activeId, onNav) -> the desktop labeled rail ---------
+  // --- navRail(views, activeId, onNav, opts) -> the desktop labeled rail ---
   // views: [{id,title,icon,order}]  onNav(id)
-  C.navRail = function (views, activeId, onNav) {
+  // opts: { onSettings()            — the ⚙ gear (opens the Settings MODAL),
+  //         server: {               — the rail-footer Server panel (client's
+  //           url, onUrl(v),          ConnectionPanel parity)
+  //           onCheck(), onToggle(),
+  //           starting, owns, startDisabled, startTooltip } }
+  C.navRail = function (views, activeId, onNav, opts) {
+    opts = opts || {};
     var brand = el('div', { class: 'pa-brand' },
       el('span', { class: 'pa-brand-mark', text: 'P' }),
       el('span', { class: 'pa-brand-name', text: 'ProjectAI' })
@@ -23,22 +29,65 @@
       }, icon(v.icon || 'circle'), el('span', { text: v.title }));
     });
 
-    var foot = el('div', { class: 'pa-rail-foot' },
-      el('span', { class: 'pa-status-dot', dataset: { role: 'status-dot' } }),
-      el('span', { dataset: { role: 'status-text' }, text: 'Not connected' })
-    );
+    // Bottom block: gear pinned above the Server panel (above the rail footer).
+    var bottom = el('div', { class: 'pa-rail-bottom' });
+    if (opts.onSettings) {
+      bottom.appendChild(el('button', {
+        class: 'pa-nav-item',
+        onClick: function () { opts.onSettings(); },
+      }, icon('settings'), el('span', { text: 'Settings' })));
+    }
+    if (opts.server) bottom.appendChild(C.serverPanel(opts.server));
 
-    return el('nav', { class: 'pa-rail' }, brand, items, foot);
+    return el('nav', { class: 'pa-rail' }, brand, items, bottom);
   };
 
-  // --- bottomTabs(views, activeId, onNav) -> the mobile tab bar ------------
-  C.bottomTabs = function (views, activeId, onNav) {
+  // --- serverPanel(s) -> the rail-footer Server panel ----------------------
+  // Mirrors Client/ai-client/Ui/Shell/ConnectionPanel.cs: caption, URL input,
+  // "Check connection", "Start/Stop local server", status line. The status
+  // line carries data-role="server-status" so the app can update it in place.
+  C.serverPanel = function (s) {
+    s = s || {};
+    var url = el('input', {
+      class: 'pa-input', type: 'text', value: s.url || '',
+      placeholder: 'http://localhost:8080', spellcheck: 'false',
+      onChange: function (e) { s.onUrl && s.onUrl(e.target.value); },
+    });
+
+    var check = C.button('Check connection', { small: true, onClick: s.onCheck || null });
+
+    var toggle = C.button(
+      s.starting ? 'Starting…' : (s.owns ? 'Stop local server' : 'Start local server'),
+      { small: true, onClick: s.onToggle || null, disabled: !!s.starting || !!s.startDisabled }
+    );
+    if (s.startTooltip) toggle.title = s.startTooltip;
+
+    var status = el('div', {
+      class: 'pa-rail-server-status',
+      dataset: { role: 'server-status' },
+      text: 'Not connected',
+    });
+
+    return el('div', { class: 'pa-rail-server', dataset: { role: 'server-panel' } },
+      el('div', { class: ['pa-xs', 'pa-muted'], style: { fontWeight: '600' }, text: 'Server' }),
+      url, check, toggle, status
+    );
+  };
+
+  // --- bottomTabs(views, activeId, onNav, onSettings) -> the mobile tab bar -
+  C.bottomTabs = function (views, activeId, onNav, onSettings) {
     var tabs = views.map(function (v) {
       return el('button', {
         class: ['pa-tab', v.id === activeId ? 'is-active' : ''],
         onClick: function () { onNav && onNav(v.id); },
       }, icon(v.icon || 'circle'), el('span', { text: v.title }));
     });
+    if (onSettings) {
+      tabs.push(el('button', {
+        class: 'pa-tab',
+        onClick: function () { onSettings(); },
+      }, icon('settings'), el('span', { text: 'Settings' })));
+    }
     return el('div', { class: 'pa-tabs' }, tabs);
   };
 
@@ -76,8 +125,9 @@
     );
   };
 
-  // --- table({cols, rows}) -------------------------------------------------
+  // --- table({cols, rows, onRowClick}) --------------------------------------
   // cols: [{key,label,render?(row)->node|string}]  rows: object[]
+  // onRowClick(rowIndex, row): makes rows clickable (benchmark case diff).
   C.table = function (opts) {
     opts = opts || {};
     var cols = opts.cols || [];
@@ -87,13 +137,18 @@
       cols.map(function (c) { return el('th', { text: c.label != null ? c.label : c.key }); })
     ));
 
-    var tbody = el('tbody', {}, rows.map(function (row) {
-      return el('tr', {}, cols.map(function (c) {
+    var tbody = el('tbody', {}, rows.map(function (row, ri) {
+      var tr = el('tr', {}, cols.map(function (c) {
         var content = c.render ? c.render(row) : (row[c.key] != null ? String(row[c.key]) : '');
         return el('td', {}, typeof content === 'string' || typeof content === 'number'
           ? document.createTextNode(String(content))
           : content);
       }));
+      if (opts.onRowClick) {
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', function () { opts.onRowClick(ri, row); });
+      }
+      return tr;
     }));
 
     return el('table', { class: 'pa-table' }, thead, tbody);
@@ -149,6 +204,63 @@
       body ? el('div', { class: 'pa-empty-body', text: body }) : null,
       cta || null
     );
+  };
+
+  // --- openModal(title, bodyNode, opts) -> { root, body, close } -----------
+  // A centered modal over a dimmed backdrop, appended to <body>. Clicking the
+  // backdrop or the ✕ closes it. opts: { wide } for the 720px variant.
+  C.openModal = function (title, bodyNode, opts) {
+    opts = opts || {};
+    var handle = {};
+
+    var body = el('div', { class: 'pa-modal-body' }, bodyNode || null);
+    var closeBtn = el('button', {
+      class: ['pa-btn', 'pa-btn-ghost', 'pa-btn-sm'],
+      type: 'button',
+      onClick: function () { handle.close(); },
+    }, icon('x'));
+
+    var modal = el('div', { class: ['pa-modal', opts.wide ? 'pa-modal-wide' : ''] },
+      el('div', { class: 'pa-modal-head' },
+        el('span', { class: 'pa-grow', text: title || '' }),
+        closeBtn
+      ),
+      body
+    );
+
+    var backdrop = el('div', {
+      class: 'pa-modal-backdrop',
+      onClick: function (ev) { if (ev.target === backdrop) handle.close(); },
+    }, modal);
+
+    handle.root = backdrop;
+    handle.body = body;
+    handle.close = function () {
+      if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop);
+    };
+
+    document.body.appendChild(backdrop);
+    return handle;
+  };
+
+  // --- progress() -> { root, set(pct), setStatus(text, tone) } --------------
+  // A thin progress bar + a status line beneath it (train / benchmark polls).
+  C.progress = function () {
+    var fill = el('div', { class: 'pa-progress-fill' });
+    var bar = el('div', { class: 'pa-progress' }, fill);
+    var status = el('div', { class: ['pa-xs', 'pa-tone-muted'] });
+    var root = el('div', { class: ['pa-col', 'pa-gap-3'] }, bar, status);
+    return {
+      root: root,
+      set: function (pct) {
+        pct = Math.max(0, Math.min(100, Number(pct) || 0));
+        fill.style.width = pct + '%';
+      },
+      setStatus: function (text, tone) {
+        status.textContent = text || '';
+        status.className = 'pa-xs ' + (tone === 'good' ? 'pa-tone-good' : tone === 'bad' ? 'pa-tone-bad' : 'pa-tone-muted');
+      },
+    };
   };
 
   PA.components = C;

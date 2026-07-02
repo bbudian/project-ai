@@ -67,8 +67,42 @@ public partial class SettingsWindow : Window
         _serverUrl = new LineEdit { SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
         _serverUrl.TextChanged += url => _state.SetServerUrl(url); // same live wiring as the connection panel
         body.AddChild(Palette.Field("Server URL", _serverUrl));
+
+        // Local-server lifecycle: empty fields mean "auto-discover from the repo layout".
+        var exe = new LineEdit
+        {
+            Text = _state.Prefs.ServerExePath,
+            PlaceholderText = "auto — <repo>/ProjectAI/bin/…/projectai.exe",
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
+        exe.TextChanged += v => _state.MutatePrefs(p => p.ServerExePath = v.Trim());
+        body.AddChild(Palette.Field("Server exe", exe));
+
+        var modelsDir = new LineEdit
+        {
+            Text = _state.Prefs.ServerModelsDir,
+            PlaceholderText = "auto — <repo>/checkpoints",
+            SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+        };
+        modelsDir.TextChanged += v => _state.MutatePrefs(p => p.ServerModelsDir = v.Trim());
+        body.AddChild(Palette.Field("Models dir", modelsDir));
+
+        var extraArgs = new LineEdit { Text = _state.Prefs.ServerExtraArgs, SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        extraArgs.TextChanged += v => _state.MutatePrefs(p => p.ServerExtraArgs = v);
+        body.AddChild(Palette.Field("Server args", extraArgs));
+
+        var autoStart = new CheckButton { Text = "Start the server automatically when unreachable", ButtonPressed = _state.Prefs.AutoStartServer };
+        autoStart.AddThemeColorOverride("font_color", Palette.Text);
+        autoStart.Toggled += on => _state.MutatePrefs(p => p.AutoStartServer = on);
+        body.AddChild(autoStart);
+
+        var stopOnExit = new CheckButton { Text = "Stop a server this app started when it closes", ButtonPressed = _state.Prefs.StopServerOnExit };
+        stopOnExit.AddThemeColorOverride("font_color", Palette.Text);
+        stopOnExit.Toggled += on => _state.MutatePrefs(p => p.StopServerOnExit = on);
+        body.AddChild(stopOnExit);
+
         body.AddChild(Palette.Heading(
-            "Model, backend, sampling, and text size live in the chat composer's ⚙ popup; all of it persists locally.",
+            "Model, backend, sampling, and text size live in the chat composer; all of it persists locally.",
             Palette.Type.Caption, Palette.Muted));
         return Palette.Card(body, "App (this machine)");
     }

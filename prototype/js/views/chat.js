@@ -1,14 +1,26 @@
 /* ============================================================================
-   views/chat.js — the flagship WORKING view: Chat.
-   Transcript + composer with model/backend pickers, a memory toggle and a
-   web-research toggle, Send + Stop. Streams replies through the PA.data().chat()
-   controller (real WS on Live, simulated on Mock).
+   views/chat.js — the flagship WORKING view: Chat. 1:1 with the Godot client
+   (Ui/Views/ChatView.cs + Ui/Composer.cs + Ui/TurnCard.cs).
 
-   BINDS ONLY to the foundation contract:
-     - data via PA.data() (never fetch / PA.api / PA.mock)
-     - DOM via PA.ui + PA.components + the documented CSS classes
-     - colors only from CSS variables (var(--pa-*)); no color literals here
-   Responsive: the picker row uses .pa-grid so it collapses to 1 column on mobile.
+   Topbar: title (ellipsized first prompt; "New chat" initially) + an "instruct"
+   accent badge (shown when the WS ready frame says instruct:true) + a muted
+   context meter + a Clear action.
+
+   Composer (a card):
+     row 1  Model select (3fr) + Backend select (2fr)
+     row 2  🧠 Memory + 🌐 Web pill chips + a status span ("Generating…")
+     row 3  the prompt textarea (Enter sends, Shift+Enter newline)
+     row 4  "⚙ Advanced" (a popover ABOVE the composer: Sample gating
+            Temperature/Top-K/Top-P/Seed, "Limit response length" gating Max
+            tokens, Text size that live-resizes the transcript) + Send/Stop.
+
+   Sessions: memory rides the START frame only ({memory:true, user:'default'},
+   store omitted → the server defaults it to the model name). Toggling
+   memory/model/backend restarts the session. The server spells the cancel
+   stop reason 'canceled'.
+
+   BINDS ONLY to the foundation contract: data via PA.data(), DOM via PA.ui +
+   PA.components + token-driven classes; colors only from var(--pa-*).
    ========================================================================== */
 (function (PA) {
   var el = PA.ui.el;
@@ -21,24 +33,71 @@
     order: 1,
 
     render: function (root, ctx) {
-      // ---- view-local state --------------------------------------------------
-      var turns = [];            // [{role:'user'|'assistant', text, recalled?, sources?, error?}]
+      // ---- view-local state ------------------------------------------------
+      var turns = [];            // [{role, text, streaming?, sources?, error?, note?, _bodyEl?}]
       var busy = false;          // a reply is currently streaming
-      var memoryOn = true;       // inject memory/user/store into requests
+      var stopping = false;      // Stop pressed; waiting for the server's done
+      var memoryOn = false;      // attach the model's memory store (start frame only)
       var researchOn = false;    // web-research (sources as citations)
       var controller = null;     // PA.data().chat() controller
       var activeTurn = null;     // the assistant turn currently being streamed
+      var title = 'New chat';
+
+      // Session identity — a change to any of these restarts the WS session
+      // (memory is baked into the warm cache on the start frame).
+      var session = { started: false, model: null, backend: null, memory: null };
+
+      // Advanced settings (client defaults).
+      var adv = {
+        sample: false,       // off = greedy / deterministic
+        temperature: 0.8,
+        topK: 40,
+        topP: 0.9,
+        seed: 0,
+        capLength: false,    // off = dynamic (maxTokens 0 — until the model stops)
+        maxTokens: 1024,
+        fontSize: 14,
+      };
 
       var st = ctx.store.get();
       var model = st.selectedModel || (st.models && st.models[0]) || null;
       var backend = st.selectedBackend ||
         (st.backends && (st.backends.find(function (b) { return b.available; }) || st.backends[0]) || {}).id || null;
 
-      // ---- element handles (assigned during build) --------------------------
-      var transcriptEl, inputEl, sendBtn, stopBtn, statusEl;
+      // ---- element handles ---------------------------------------------------
+      var transcriptEl, inputEl, sendBtn, statusEl, advPop;
 
       // ======================================================================
-      // Composer controls: model picker, backend picker, memory + web toggles
+      // Topbar: title + instruct badge + context meter + Clear
+      // ======================================================================
+      var instructBadge = C.badge('instruct', 'accent');
+      instructBadge.title = 'The server detected a chat-templated (instruct) model for this session.';
+      instructBadge.classList.add('pa-hidden');
+
+      var meterEl = el('span', { class: ['pa-xs', 'pa-muted'] });
+
+      var clearBtn = C.button('Clear', {
+        ghost: true, small: true, icon: 'eraser',
+        onClick: function () {
+          if (busy) onStop();
+          turns = [];
+          activeTurn = null;
+          title = 'New chat';
+          meterEl.textContent = '';
+          session.started = false; // next message starts a fresh server session
+          setTopBar();
+          renderTranscript();
+        },
+      });
+      clearBtn.title = 'Clear the conversation (the next message starts a fresh session).';
+
+      function setTopBar() {
+        ctx.setTopBar(title, [instructBadge, meterEl, clearBtn]);
+      }
+      setTopBar();
+
+      // ======================================================================
+      // Composer row 1: Model (3fr) + Backend (2fr)
       // ======================================================================
       function modelOptions() {
         var models = ctx.store.get().models || [];
@@ -78,13 +137,14 @@
         },
       }, backendOptions());
 
-      // Rebuild the picker <option>s in place. Called when the store's model/
-      // backend catalogs arrive after the first render (health is async and
-      // app.js does NOT re-mount views on store changes — only on route change).
+      // Rebuild the picker <option>s in place when the store's catalogs arrive
+      // after the first render (health is async).
       function refreshPickers() {
         var s = ctx.store.get();
-        // Adopt store defaults if we still have none (health resolved post-render).
         if (!model) model = s.selectedModel || (s.models && s.models[0]) || null;
+        else if (s.selectedModel && s.selectedModel !== model && s.models && s.models.indexOf(s.selectedModel) >= 0) {
+          model = s.selectedModel; // another view chose a model (e.g. "Chat with" on a card)
+        }
         if (!backend) {
           backend = s.selectedBackend ||
             (s.backends && (s.backends.find(function (b) { return b.available; }) || s.backends[0]) || {}).id || null;
@@ -93,24 +153,24 @@
         ui.mount(backendSelect, backendOptions());
       }
 
+      var pickerGrid = el('div', { class: 'pa-composer-pickers' }, modelSelect, backendSelect);
+
+      // ======================================================================
+      // Composer row 2: 🧠 Memory + 🌐 Web chips + status span
+      // ======================================================================
       var memoryChip = C.chip({
-        icon: 'brain',
-        label: 'Memory',
+        label: '🧠  Memory',
         active: memoryOn,
         onClick: function () { memoryOn = !memoryOn; memoryChip.classList.toggle('is-active', memoryOn); },
       });
+      memoryChip.title = "Attach this model's long-term memory store to the conversation (toggling restarts the session).";
 
       var webChip = C.chip({
-        icon: 'world-search',
-        label: 'Web',
+        label: '🌐  Web',
         active: researchOn,
         onClick: function () { researchOn = !researchOn; webChip.classList.toggle('is-active', researchOn); },
       });
-
-      var pickerGrid = el('div', { class: ['pa-grid', 'pa-grid-2', 'pa-gap-3'] },
-        C.field('Model', modelSelect),
-        C.field('Backend', backendSelect)
-      );
+      webChip.title = 'Ground answers in a live web search with citations (needs a Tavily key — Settings → Web search).';
 
       var toggleRow = el('div', { class: ['pa-row', 'pa-wrap', 'pa-gap-3'] },
         memoryChip,
@@ -119,28 +179,111 @@
         statusEl = el('span', { class: ['pa-xs', 'pa-muted'] })
       );
 
-      // ---- input + Send/Stop ------------------------------------------------
+      // ======================================================================
+      // Composer row 3: the prompt textarea
+      // ======================================================================
       inputEl = el('textarea', {
         class: 'pa-input',
         rows: 2,
-        placeholder: 'Ask ProjectAI anything…  (Enter to send, Shift+Enter for newline)',
+        placeholder: 'Message ProjectAI…  (Enter to send, Shift+Enter for newline)',
         style: { resize: 'vertical', minHeight: '52px' },
         onKeydown: function (e) {
           if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSend(); }
         },
       });
 
-      sendBtn = C.button('Send', { primary: true, icon: 'send', onClick: onSend });
-      stopBtn = C.button('Stop', { ghost: true, icon: 'player-stop', onClick: onStop, disabled: true });
+      // ======================================================================
+      // Composer row 4: ⚙ Advanced (popover above) + Send/Stop
+      // ======================================================================
+      function numField(label, value, min, max, step, onChange) {
+        var input = el('input', {
+          class: 'pa-input', type: 'number',
+          min: String(min), max: String(max), step: String(step), value: String(value),
+          style: { width: '110px' },
+          onChange: function (e) {
+            var v = Number(e.target.value);
+            if (e.target.value === '' || isNaN(v)) { e.target.value = String(value); return; }
+            v = Math.min(max, Math.max(min, v));
+            e.target.value = String(v);
+            onChange(v);
+          },
+        });
+        var row = el('div', { class: ['pa-row', 'pa-gap-3'] },
+          el('span', { class: ['pa-sm', 'pa-muted', 'pa-grow'], text: label }),
+          input
+        );
+        return { row: row, input: input };
+      }
+
+      var tempField = numField('Temperature', adv.temperature, 0, 2, 0.05, function (v) { adv.temperature = v; });
+      var topKField = numField('Top-K', adv.topK, 0, 200, 1, function (v) { adv.topK = v; });
+      var topPField = numField('Top-P', adv.topP, 0.05, 1, 0.05, function (v) { adv.topP = v; });
+      var seedField = numField('Seed', adv.seed, 0, 4294967295, 1, function (v) { adv.seed = v; });
+      var maxTokField = numField('Max tokens', adv.maxTokens, 1, 8192, 1, function (v) { adv.maxTokens = v; });
+      var fontField = numField('Text size', adv.fontSize, 11, 28, 1, function (v) {
+        adv.fontSize = v;
+        transcriptEl.style.fontSize = v + 'px'; // live-resizes the conversation text
+      });
+
+      function gateSampling() {
+        [tempField, topKField, topPField, seedField].forEach(function (f) { f.input.disabled = !adv.sample; });
+      }
+      function gateCap() { maxTokField.input.disabled = !adv.capLength; }
+
+      // C.toggle renders a fixed on/off state, so rebuild it when it flips.
+      var sampleRowHost = el('span', {});
+      var capRowHost = el('span', {});
+      function buildSampleToggle() {
+        return C.toggle(adv.sample, function (on) { adv.sample = on; ui.mount(sampleRowHost, buildSampleToggle()); gateSampling(); }, ['Off', 'On']);
+      }
+      function buildCapToggle() {
+        return C.toggle(adv.capLength, function (on) { adv.capLength = on; ui.mount(capRowHost, buildCapToggle()); gateCap(); }, ['Off', 'On']);
+      }
+      ui.mount(sampleRowHost, buildSampleToggle());
+      ui.mount(capRowHost, buildCapToggle());
+
+      advPop = el('div', { class: ['pa-popover', 'pa-hidden'] },
+        el('div', { class: ['pa-row', 'pa-gap-3'] },
+          el('span', { class: ['pa-sm', 'pa-grow'], text: 'Sample  (off = greedy / deterministic)' }),
+          sampleRowHost
+        ),
+        tempField.row, topKField.row, topPField.row, seedField.row,
+        el('div', { style: { borderTop: '1px solid var(--pa-border)' } }),
+        el('div', { class: ['pa-row', 'pa-gap-3'] },
+          el('span', { class: ['pa-sm', 'pa-grow'], text: 'Limit response length  (off = until the model stops)' }),
+          capRowHost
+        ),
+        maxTokField.row,
+        el('div', { style: { borderTop: '1px solid var(--pa-border)' } }),
+        el('div', { class: ['pa-xs', 'pa-muted'], text: 'Appearance' }),
+        fontField.row
+      );
+      gateSampling();
+      gateCap();
+
+      var advBtn = C.button('⚙  Advanced', {
+        ghost: true, small: true,
+        onClick: function () { advPop.classList.toggle('pa-hidden'); },
+      });
+      advBtn.title = 'Sampling, response length, seed, and text size';
+
+      // Send doubles as Stop while a reply streams (client parity).
+      sendBtn = C.button('Send  ↵', { primary: true, onClick: onSendPressed });
 
       var actionRow = el('div', { class: ['pa-row', 'pa-gap-3'] },
-        el('div', { class: 'pa-grow' }, inputEl),
-        el('div', { class: ['pa-col', 'pa-gap-3'] }, sendBtn, stopBtn)
+        advBtn,
+        el('span', { class: 'pa-spacer' }),
+        sendBtn
       );
 
-      var composer = el('div', { class: 'pa-card', style: { display: 'flex', flexDirection: 'column', gap: 'var(--pa-sp-3)' } },
+      var composer = el('div', {
+        class: ['pa-card', 'pa-popover-host'],
+        style: { display: 'flex', flexDirection: 'column', gap: 'var(--pa-sp-3)' },
+      },
+        advPop,
         pickerGrid,
         toggleRow,
+        inputEl,
         actionRow
       );
 
@@ -152,6 +295,7 @@
         style: {
           display: 'flex', flexDirection: 'column', gap: 'var(--pa-sp-4)',
           padding: 'var(--pa-sp-2) 0',
+          fontSize: adv.fontSize + 'px',
         },
       });
 
@@ -161,7 +305,7 @@
           transcriptEl.appendChild(C.emptyState(
             'message-2',
             'Start a conversation',
-            'Pick a model and backend, then send a message. Toggle Memory to recall context, or Web to cite live sources.'
+            'Pick a model and backend, then send a message. Toggle Memory to attach the model’s store, or Web to cite live sources.'
           ));
           return;
         }
@@ -170,60 +314,43 @@
       }
 
       function renderTurn(t) {
-        var isUser = t.role === 'user';
-        var wrap = el('div', {
-          class: 'pa-col',
-          style: {
-            gap: 'var(--pa-sp-2)',
-            alignItems: isUser ? 'flex-end' : 'stretch',
-          },
-        });
-
-        // "recalled N memories" hint line above an assistant reply when memory is on
-        if (!isUser && t.recalled != null && t.recalled > 0) {
-          wrap.appendChild(el('div', { class: ['pa-row', 'pa-gap-3', 'pa-xs', 'pa-muted'] },
-            ui.icon('brain', 'pa-xs'),
-            el('span', { text: 'recalled ' + t.recalled + ' ' + (t.recalled === 1 ? 'memory' : 'memories') })
-          ));
+        // The user's turn: a right-aligned captionless bubble at ~72% width.
+        if (t.role === 'user') {
+          return el('div', { class: 'pa-turn-user' },
+            el('div', { class: 'pa-bubble-user', text: t.text })
+          );
         }
 
+        // The model's turn: a full-width panel with the app caption.
         var bubble = el('div', {
           class: 'pa-card',
           style: {
-            maxWidth: isUser ? '78%' : '100%',
-            background: isUser ? 'var(--pa-user)' : 'var(--pa-panel)',
+            background: 'var(--pa-panel)',
             borderColor: t.error ? 'var(--pa-bad)' : 'var(--pa-border)',
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-word',
           },
         });
 
-        var head = el('div', { class: ['pa-row', 'pa-gap-3'], style: { marginBottom: 'var(--pa-sp-2)' } },
-          ui.icon(isUser ? 'user' : 'robot', 'pa-sm'),
-          el('span', { class: ['pa-xs', 'pa-muted'], text: isUser ? 'You' : (t.model || 'Assistant') })
-        );
-        bubble.appendChild(head);
+        bubble.appendChild(el('div', { class: ['pa-xs', 'pa-muted'], style: { marginBottom: 'var(--pa-sp-2)' }, text: 'ProjectAI' }));
 
-        var body = el('div', { class: t.streaming && !t.text ? 'pa-muted' : '' });
-        body.textContent = t.text || (t.streaming ? '…' : '');
-        // expose the body so streaming can append without a full re-render
+        var body = el('div', { class: t.streaming && !t.text ? 'pa-muted' : (t.emptyNote ? 'pa-muted' : '') });
+        body.textContent = t.text || (t.streaming ? 'Generating…' : (t.emptyNote || ''));
+        if (t.error) {
+          body.textContent = t.error;
+          body.className = '';
+          body.style.color = 'var(--pa-bad)';
+        }
         t._bodyEl = body;
         bubble.appendChild(body);
 
-        if (t.error) {
-          bubble.appendChild(el('div', { class: ['pa-row', 'pa-gap-3', 'pa-sm', 'pa-mt-3'], style: { color: 'var(--pa-bad)' } },
-            ui.icon('alert-triangle', 'pa-sm'),
-            el('span', { text: t.error })
-          ));
-        }
+        // Web-research citations: numbered links.
+        if (t.sources && t.sources.length) bubble.appendChild(renderSources(t));
 
-        // sources as citations (web-research)
-        if (t.sources && t.sources.length) {
-          bubble.appendChild(renderSources(t));
-        }
+        // Stop-reason footer ('⏹ Stopped' / context note); hidden on a natural finish.
+        if (t.note) bubble.appendChild(el('div', { class: ['pa-turn-note', 'pa-mt-3'], text: t.note }));
 
-        wrap.appendChild(bubble);
-        return wrap;
+        return bubble;
       }
 
       function renderSources(t) {
@@ -231,25 +358,18 @@
           class: 'pa-mt-4',
           style: { borderTop: '1px solid var(--pa-border)', paddingTop: 'var(--pa-sp-3)' },
         });
-        box.appendChild(el('div', { class: ['pa-row', 'pa-gap-3', 'pa-xs', 'pa-muted'], style: { marginBottom: 'var(--pa-sp-2)' } },
-          ui.icon('link', 'pa-xs'),
-          el('span', { text: t.sources.length + ' ' + (t.sources.length === 1 ? 'source' : 'sources') })
-        ));
+        box.appendChild(el('div', { class: ['pa-xs', 'pa-muted'], style: { marginBottom: 'var(--pa-sp-2)' }, text: 'Sources' }));
         var list = el('div', { class: ['pa-col', 'pa-gap-3'] });
         t.sources.forEach(function (s, i) {
-          list.appendChild(el('div', { class: ['pa-row', 'pa-gap-3'], style: { alignItems: 'baseline' } },
-            C.badge(String(i + 1), 'accent'),
-            el('div', { class: 'pa-grow' },
-              s.url
-                ? el('a', {
-                    href: s.url, target: '_blank', rel: 'noopener noreferrer',
-                    class: 'pa-sm', style: { color: 'var(--pa-accent)', textDecoration: 'none' },
-                    text: s.title || s.url,
-                  })
-                : el('div', { class: 'pa-sm', text: s.title || '(untitled)' }),
-              s.snippet ? el('div', { class: ['pa-xs', 'pa-muted'], text: ui.truncate(s.snippet, 140) }) : null
-            )
-          ));
+          var label = '[' + (i + 1) + '] ' + ui.truncate(s.title || s.url || '(untitled)', 70);
+          list.appendChild(s.url
+            ? el('a', {
+                href: s.url, target: '_blank', rel: 'noopener noreferrer',
+                class: 'pa-sm', style: { color: 'var(--pa-accent)', textDecoration: 'none' },
+                title: s.url,
+                text: label,
+              })
+            : el('div', { class: 'pa-sm', text: label }));
         });
         box.appendChild(list);
         return box;
@@ -259,7 +379,7 @@
       // Streaming: append a token into the active assistant turn in place
       // ======================================================================
       function appendToken(text) {
-        if (!activeTurn) return;
+        if (!activeTurn || !text) return;
         activeTurn.text += text;
         if (activeTurn._bodyEl) {
           activeTurn._bodyEl.className = '';
@@ -268,55 +388,65 @@
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
       }
 
-      // setBusy toggles the send/stop/input controls. When `status` is passed
-      // it sets that message; otherwise it defaults ('Generating…' on, '' off).
-      // onDone passes a completion summary so it isn't wiped by the reset.
-      function setBusy(on, status) {
+      function setBusy(on) {
         busy = on;
-        sendBtn.disabled = on;
-        stopBtn.disabled = !on;
-        inputEl.disabled = on;
-        setStatus(status != null ? status : (on ? 'Generating…' : ''));
+        if (!on) stopping = false;
+        sendBtn.disabled = stopping;
+        ui.mount(sendBtn, el('span', { text: stopping ? 'Stopping…' : (on ? 'Stop  ◼' : 'Send  ↵') }));
+        statusEl.textContent = on ? 'Generating…' : '';
       }
 
-      function setStatus(msg) {
-        if (statusEl) statusEl.textContent = msg || '';
+      // Marks a streamed turn finished, annotating why it ended (TurnCard parity).
+      function completeTurn(t, stop) {
+        t.streaming = false;
+        var canceled = stop === 'canceled' || stop === 'cancelled'; // the server spells it 'canceled'
+        if (!t.text) {
+          t.emptyNote =
+            stop === 'context_full' ? 'Context window full — start a New chat to continue.' :
+            canceled ? 'Stopped before any output.' :
+            '(empty response)';
+          return;
+        }
+        if (canceled) t.note = '⏹ Stopped';
+        else if (stop === 'context') t.note = 'Reached the context limit — start a New chat to continue.';
+        // eos / im_end / maxTokens → a natural end, no footer
       }
 
       // ======================================================================
-      // Controller wiring — one PA.data().chat() controller reused per turn
+      // Controller wiring — one PA.data().chat() controller, restarted when the
+      // session identity (model/backend/memory) changes
       // ======================================================================
       function ensureController() {
         if (controller) return controller;
         controller = ctx.data().chat({
           onOpen: function () { /* transport ready */ },
+          onReady: function (info) {
+            // The server accepted the session: reflect instruct + context size.
+            instructBadge.classList.toggle('pa-hidden', !(info && info.instruct));
+            if (info && info.contextLimit > 0) meterEl.textContent = 'ctx ' + ui.fmtNum(info.contextLimit);
+          },
           onToken: function (text) { appendToken(text); },
           onSources: function (list) {
             if (activeTurn) { activeTurn.sources = list || []; renderTranscript(); }
           },
           onDone: function (info) {
-            var summary = '';
-            if (activeTurn) {
-              activeTurn.streaming = false;
-              if (info && (info.stop === 'cancelled' || info.stop === 'canceled') && !activeTurn.text) { // live server spells it 'canceled'
-                activeTurn.text = '(stopped)';
-              }
-              if (info && info.stop) {
-                summary = 'Done · stop: ' + info.stop +
-                  (info.seconds != null ? ' · ' + ui.fmtSecs(info.seconds) : '') +
-                  (info.generatedTokens != null ? ' · ' + ui.fmtNum(info.generatedTokens) + ' tok' : '');
-              }
-            }
+            info = info || {};
+            if (activeTurn) completeTurn(activeTurn, info.stop);
             activeTurn = null;
-            setBusy(false, summary);   // keep the completion summary in the status line
+            setBusy(false);
             renderTranscript();
+            // The short done form (research canceled mid-search) has no accounting — keep the previous meter then.
+            if (info.contextLimit > 0) {
+              meterEl.textContent =
+                ui.fmtNum(info.position) + ' / ' + ui.fmtNum(info.contextLimit) + ' ctx   ·   ' +
+                ui.fmtNum(info.generatedTokens) + ' tok in ' + Number(info.seconds || 0).toFixed(1) + 's';
+            }
           },
           onError: function (err) {
             var msg = (err && err.message) || String(err) || 'Chat failed';
             if (activeTurn) {
               activeTurn.streaming = false;
               activeTurn.error = msg;
-              if (!activeTurn.text) activeTurn.text = '';
             } else {
               turns.push({ role: 'assistant', text: '', error: msg });
             }
@@ -324,19 +454,41 @@
             setBusy(false);
             renderTranscript();
           },
-          onClose: function () { controller = null; },
+          onClose: function () {
+            // Connection dropped: fail any in-flight turn; force a fresh session next message.
+            if (busy && activeTurn) {
+              activeTurn.streaming = false;
+              activeTurn.error = 'Chat connection closed — is `projectai serve` running?';
+              activeTurn = null;
+              setBusy(false);
+              renderTranscript();
+            }
+            controller = null;
+            session.started = false;
+          },
         });
-        // start() names the model + backend for this session
-        controller.start(model, backend, buildOpts());
+        session.started = false; // a new controller always needs a start frame
         return controller;
       }
 
-      // request options: memory/user/store when Memory is on, research when Web is on
-      function buildOpts() {
-        var opts = { research: researchOn, memory: memoryOn };
-        if (memoryOn) {
-          opts.user = 'me';
-          opts.store = 'default';
+      // Memory rides the START frame only: {memory:true, user:'default'}, store
+      // omitted → the server defaults it to the model name.
+      function startOpts() {
+        return memoryOn ? { memory: true, user: 'default' } : {};
+      }
+
+      // Per-message options: decoding + research (never memory — that's session-scoped).
+      function messageOpts() {
+        var opts = {
+          sample: adv.sample,
+          maxTokens: adv.capLength ? adv.maxTokens : 0, // 0 = dynamic (until the model stops)
+          research: researchOn,
+        };
+        if (adv.sample) {
+          opts.temperature = adv.temperature;
+          opts.topK = adv.topK;
+          opts.topP = adv.topP;
+          opts.seed = adv.seed;
         }
         return opts;
       }
@@ -344,6 +496,11 @@
       // ======================================================================
       // Send / Stop
       // ======================================================================
+      function onSendPressed() {
+        if (!busy) { onSend(); return; }
+        onStop();
+      }
+
       function onSend() {
         if (busy) return;
         var text = (inputEl.value || '').trim();
@@ -351,26 +508,27 @@
         if (!model) { flashStatus('Pick a model first'); return; }
 
         inputEl.value = '';
+        advPop.classList.add('pa-hidden');
 
-        // user turn
         turns.push({ role: 'user', text: text });
-
-        // assistant placeholder turn (streamed into)
-        activeTurn = {
-          role: 'assistant', text: '', streaming: true, model: model,
-          recalled: memoryOn ? recalledCount(text) : null,
-          sources: null,
-        };
+        activeTurn = { role: 'assistant', text: '', streaming: true, sources: null };
         turns.push(activeTurn);
+
+        if (title === 'New chat') { title = ui.truncate(text, 40); setTopBar(); }
 
         renderTranscript();
         setBusy(true);
 
         try {
           var ctl = ensureController();
-          ctl.send(text, buildOpts());
+          // (Re)start the session when first connecting, or when the
+          // model/backend/memory choice changed (memory is start-frame only).
+          if (!session.started || session.model !== model || session.backend !== backend || session.memory !== memoryOn) {
+            ctl.start(model, backend, startOpts());
+            session = { started: true, model: model, backend: backend, memory: memoryOn };
+          }
+          ctl.send(text, messageOpts());
         } catch (e) {
-          // synchronous failure — surface it on the active turn
           activeTurn.streaming = false;
           activeTurn.error = (e && e.message) || 'Failed to send';
           activeTurn = null;
@@ -379,51 +537,26 @@
         }
       }
 
+      // Stop: ask the server to halt; it ends the turn with done (stop=canceled),
+      // keeping the partial reply.
       function onStop() {
-        if (!busy) return;
+        if (!busy || stopping) return;
+        stopping = true;
+        setBusy(true); // re-render the button as "Stopping…" (disabled until done lands)
         try { if (controller) controller.cancel(); } catch (e) { /* ignore */ }
       }
 
-      // A small deterministic "recalled N" for the memory hint. The real count
-      // would come from the server; Mock has no per-turn recall count, so we
-      // derive a stable non-zero number from the prompt length.
-      function recalledCount(text) {
-        var max = (ctx.store.get().settings &&
-          ctx.store.get().settings.memory &&
-          ctx.store.get().settings.memory.maxRecall) || 4;
-        return Math.min(max, 1 + ((text || '').length % max));
-      }
-
       function flashStatus(msg) {
-        setStatus(msg);
-        setTimeout(function () { if (!busy) setStatus(''); }, 1800);
+        statusEl.textContent = msg;
+        setTimeout(function () { if (!busy) statusEl.textContent = ''; }, 1800);
       }
 
       // ======================================================================
-      // Topbar action: clear the conversation
-      // ======================================================================
-      var clearBtn = C.button('Clear', {
-        ghost: true, small: true, icon: 'eraser',
-        onClick: function () {
-          if (busy) onStop();
-          turns = [];
-          activeTurn = null;
-          renderTranscript();
-          setStatus('');
-        },
-      });
-      ctx.setTopBar('Chat', clearBtn);
-
-      // ======================================================================
-      // Assemble the view — a full-height column: transcript grows, composer pinned
+      // Assemble — a full-height column: transcript grows, composer pinned
       // ======================================================================
       var layout = el('div', {
         class: 'pa-col',
-        style: {
-          gap: 'var(--pa-sp-4)',
-          height: '100%',
-          minHeight: '0',
-        },
+        style: { gap: 'var(--pa-sp-4)', height: '100%', minHeight: '0' },
       },
         transcriptEl,
         composer
@@ -432,13 +565,15 @@
       root.appendChild(layout);
       renderTranscript();
 
-      // Health is async: the store's model/backend catalogs usually arrive AFTER
-      // this first render. app.js does not re-mount views on store changes, so we
-      // subscribe here to repopulate the pickers when the catalogs land. The
-      // subscription self-cleans once this view's DOM is detached (a route change
-      // clears the container), so we never leak or write into a dead view.
+      // Health is async: repopulate the pickers when the catalogs land. The subscription self-cleans once this
+      // view's DOM is detached — and takes the WebSocket with it, or every visit would leak a live /chat
+      // connection (and its warm server-side session). The Godot client's socket is app-lifetime; ours is per-mount.
       var unsub = ctx.store.subscribe(function () {
-        if (!layout.isConnected) { unsub(); return; }
+        if (!layout.isConnected) {
+          unsub();
+          if (controller) { try { controller.close(); } catch (e) {} controller = null; }
+          return;
+        }
         refreshPickers();
       });
     },

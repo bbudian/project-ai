@@ -1,291 +1,356 @@
 /* ============================================================================
-   views/models.js — the Models screen. Self-registers via PA.registerView.
+   views/models.js — the Models screen, 1:1 with the Godot client
+   (Ui/Views/ModelsView.cs + Ui/TrainPanel.cs).
 
-   A list of the server's models, each a card with size, status (loaded / idle,
-   resident MB when available) and actions: Load, Upgrade (consolidate memories
-   -> adapter; stub), Set default. A header action opens a Convert / Import HF
-   model panel (stub). Everything is built with PA.ui + PA.components + the token
-   classes, and ALL data flows through PA.data() (health / settingsGet /
-   settingsPut) — never fetch / PA.api / PA.mock directly.
+   Topbar: "＋ Train new model" toggles an inline train form (text file or
+   pasted text, name, size from /health sizes, steps, backend) → POST /train,
+   then poll GET /train/status (nested under 'training' — the seam unwraps it)
+   with a progress bar; the form auto-reveals while a job runs and health is
+   re-fetched on a terminal state so the finished model appears everywhere.
+
+   The card grid is driven by /health's modelInfos array — real metadata from
+   the server, no name-regex derivation. Per-card actions: "💬 Chat with"
+   (select + navigate) and "⊟ Tokenize…" (a probe modal over POST /tokenize).
    ========================================================================== */
 (function (PA) {
   var el = PA.ui.el;
   var ui = PA.ui;
   var C = PA.components;
 
-  // --- Derive a display-friendly record from a bare model-name string --------
-  // The foundation's health() only supplies model names (string[]); we enrich
-  // each into a card model deterministically (name -> params/family/size hint).
-  function deriveModel(name, i, defaultName, loadedSet) {
-    var lower = String(name).toLowerCase();
-    var instruct = /instruct|chat|-it\b/.test(lower);
-
-    // Parameter estimate parsed from the name (e.g. "360m", "1.7b").
-    var params = null, sizeId = 'small', sizeLabel = 'Small';
-    var pm = lower.match(/(\d+(?:\.\d+)?)\s*b\b/);
-    if (pm) { params = parseFloat(pm[1]) * 1e9; }
-    else { pm = lower.match(/(\d+(?:\.\d+)?)\s*m\b/); if (pm) params = parseFloat(pm[1]) * 1e6; }
-
-    if (params != null) {
-      if (params >= 1e9) { sizeId = 'large'; sizeLabel = 'Large'; }
-      else if (params >= 3e8) { sizeId = 'medium'; sizeLabel = 'Medium'; }
-      else if (params >= 3e7) { sizeId = 'small'; sizeLabel = 'Small'; }
-      else { sizeId = 'tiny'; sizeLabel = 'Tiny'; }
-    }
-
-    // Resident footprint estimate (F32) — only meaningful when loaded.
-    var residentMb = params != null ? Math.round((params * 4) / (1024 * 1024)) : null;
-
-    var family = 'Unknown';
-    if (/smollm/.test(lower)) family = 'SmolLM2';
-    else if (/llama/.test(lower)) family = 'Llama';
-
-    var loaded = loadedSet.indexOf(name) >= 0;
-
-    return {
-      name: name,
-      family: family,
-      kind: instruct ? 'Instruct' : 'Base',
-      params: params,
-      sizeId: sizeId,
-      sizeLabel: sizeLabel,
-      residentMb: loaded ? residentMb : null,
-      loaded: loaded,
-      isDefault: name === defaultName,
-    };
-  }
-
+  // ---- formatters (client's FormatParams / FormatBytes) --------------------
   function fmtParams(p) {
-    if (p == null) return '— params';
-    if (p >= 1e9) return (p / 1e9).toFixed(p % 1e9 === 0 ? 0 : 1) + 'B params';
-    if (p >= 1e6) return Math.round(p / 1e6) + 'M params';
-    return ui.fmtNum(p) + ' params';
+    if (p >= 1e9) return (p / 1e9).toFixed(1) + 'B';
+    if (p >= 1e6) return Math.round(p / 1e6) + 'M';
+    return ui.fmtNum(p);
+  }
+  function fmtBytes(b) {
+    if (b >= 1 << 30 || b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+    if (b >= 1048576) return Math.round(b / 1048576) + ' MB';
+    return ui.fmtNum(b) + ' B';
+  }
+  function describeMeta(info) {
+    if (!info.params || info.params <= 0) {
+      return info.fileBytes > 0 ? fmtBytes(info.fileBytes) + ' on disk' : '';
+    }
+    return fmtParams(info.params) + ' params  ·  ' + info.layers + ' layers  ·  ctx ' + ui.fmtNum(info.ctx) +
+      '  ·  ' + info.tokenizer + ' tokenizer  ·  ' + info.dtype + '  ·  step ' + ui.fmtNum(info.step) +
+      '  ·  ' + fmtBytes(info.fileBytes);
   }
 
-  // --- The view --------------------------------------------------------------
   PA.registerView('models', {
     title: 'Models',
     icon: 'box',
     order: 2,
 
     render: function (root, ctx) {
-      // ---- Local, view-scoped UI state (not global store) ------------------
-      // Which models the user has "loaded" this session (Load action is a stub
-      // — no server endpoint exists yet), plus a transient status note.
-      var localLoaded = (render._loaded = render._loaded || {});
-      var note = null;         // { tone, text } inline status line
-      var showImport = false;  // Convert/Import panel open?
-      var importName = '';     // HF repo id typed into the import panel
+      // ---- view-local state -------------------------------------------------
+      var showTrain = false;
+      var polling = null;      // setInterval handle while a job runs
+      var trainBusy = false;   // POST /train sent; waiting for terminal state
+      var draft = { text: '', fileName: '', name: 'mymodel', size: 'small', steps: 300, backend: null };
 
-      // ---- Header action: opens the Convert / Import panel -----------------
-      var importBtn = C.button('Import HF model', {
-        primary: true, icon: 'download',
-        onClick: function () { showImport = !showImport; paint(); },
+      var st0 = ctx.store.get();
+      draft.backend = st0.selectedBackend || null;
+
+      // ---- topbar action ------------------------------------------------------
+      var trainToggle = C.button('＋  Train new model', {
+        ghost: true, small: true,
+        onClick: function () { showTrain = !showTrain; paint(); },
       });
-      ctx.setTopBar('Models', importBtn);
+      ctx.setTopBar('Models', trainToggle);
 
-      // ---- flash a transient note ------------------------------------------
-      function flash(tone, text) { note = { tone: tone, text: text }; paint(); }
+      // Progress widget survives repaints so the bar doesn't flicker.
+      var progress = C.progress();
 
-      // ---- ACTIONS (Load / Upgrade / Set default) --------------------------
-      function doLoad(m) {
-        if (m.loaded) {
-          delete localLoaded[m.name];
-          flash('neutral', 'Unloaded ' + m.name + '.');
-        } else {
-          localLoaded[m.name] = true;
-          flash('good', 'Loaded ' + m.name + ' into memory.');
+      // ---- training orchestration --------------------------------------------
+      function startPolling() {
+        if (polling) return;
+        polling = setInterval(pollStatus, 1500);
+      }
+      function stopPolling() {
+        if (polling) { clearInterval(polling); polling = null; }
+      }
+
+      function pollStatus() {
+        ctx.data().trainStatus().then(function (s) {
+          if (!root.isConnected) { stopPolling(); return; }
+          applyStatus(s);
+        }).catch(function (e) {
+          progress.setStatus('Error: ' + (e.message || e), 'bad');
+        });
+      }
+
+      function applyStatus(s) {
+        switch (s.state) {
+          case 'running':
+            if (!showTrain) { showTrain = true; paint(); } // surface live progress
+            progress.set(s.totalSteps > 0 ? 100 * s.step / s.totalSteps : 0);
+            progress.setStatus(
+              "Training '" + (s.name || '') + "'…  step " + s.step + '/' + s.totalSteps +
+              (s.loss != null ? ',  loss ' + Number(s.loss).toFixed(3) : ''), 'muted');
+            startPolling();
+            break;
+          case 'done':
+            progress.set(100);
+            progress.setStatus("Done — '" + (s.name || '') + "' trained" +
+              (s.loss != null ? ' (loss ' + Number(s.loss).toFixed(3) + ')' : '') +
+              '. Switch to Chat and pick it.', 'good');
+            onTerminal();
+            break;
+          case 'error':
+            progress.setStatus('Error: ' + (s.error || 'training failed'), 'bad');
+            onTerminal();
+            break;
+          default: // idle — e.g. the server restarted and lost the job
+            if (trainBusy || polling) {
+              progress.setStatus('Training is no longer running on the server.', 'muted');
+              onTerminal();
+            }
+            break;
         }
       }
 
-      function doUpgrade(m) {
-        // Stub: consolidate memories -> adapter. No endpoint yet.
-        flash('accent', 'Upgrade queued for ' + m.name +
-          ' — consolidating memories into an adapter (stub).');
+      // Terminal state: stop polling, re-enable the form, refresh health so the
+      // finished model appears in every picker at once.
+      function onTerminal() {
+        stopPolling();
+        trainBusy = false;
+        ctx.data().health().then(function (h) {
+          if (h && h.ok) {
+            ctx.store.set({
+              health: h,
+              models: h.models || [],
+              modelInfos: h.modelInfos || [],
+              backends: h.backends || [],
+              sizes: h.sizes || [],
+            });
+          }
+        }).catch(function () { /* leave the current catalog */ });
       }
 
-      function doSetDefault(m) {
-        // Persist through the seam's settingsGet/settingsPut surface.
-        ctx.data().settingsPut({ app: { defaultModel: m.name } })
-          .then(function () {
-            var st = ctx.store.get();
-            var settings = Object.assign({}, st.settings);
-            settings.app = Object.assign({}, settings.app, { defaultModel: m.name });
-            // store.set re-mounts the view; the flash rides the fresh render.
-            note = { tone: 'good', text: m.name + ' is now the default model.' };
-            ctx.store.set({ settings: settings, selectedModel: m.name });
+      function onTrain() {
+        if (trainBusy) return;
+        var text = (draft.text || '').trim();
+        if (!text) { progress.setStatus('Pick a text file (or paste text) first.', 'bad'); return; }
+        var name = (draft.name || '').trim();
+        if (!name) { progress.setStatus('Enter a model name.', 'bad'); return; }
+
+        trainBusy = true;
+        progress.set(0);
+        progress.setStatus('Starting…', 'muted');
+        ctx.data().train({
+          name: name,
+          text: text,
+          size: draft.size,
+          steps: draft.steps,
+          backend: draft.backend || undefined,
+        }).then(function () {
+          startPolling();
+        }).catch(function (e) {
+          trainBusy = false;
+          progress.setStatus('Error: ' + (e.message || e), 'bad');
+        });
+      }
+
+      // ---- the inline train form ----------------------------------------------
+      function buildTrainForm() {
+        var s = ctx.store.get();
+        var sizes = s.sizes || [];
+        var backends = s.backends || [];
+
+        var fileNote = el('span', { class: ['pa-xs', 'pa-muted'], text: draft.fileName ? draft.fileName + '  (' + ui.fmtNum(draft.text.length) + ' chars)' : 'no file selected' });
+        var fileInput = el('input', {
+          class: 'pa-input', type: 'file', accept: '.txt,.md,.json,.csv,text/plain',
+          onChange: function (e) {
+            var f = e.target.files && e.target.files[0];
+            if (!f) return;
+            var reader = new FileReader();
+            reader.onload = function () {
+              draft.text = String(reader.result || '');
+              draft.fileName = f.name;
+              textArea.value = draft.text;
+              fileNote.textContent = f.name + '  (' + ui.fmtNum(draft.text.length) + ' chars)';
+              if (!draft.name || draft.name === 'mymodel') {
+                draft.name = f.name.replace(/\.[^.]*$/, '').replace(/[^\w-]+/g, '') || 'mymodel';
+                nameInput.value = draft.name;
+              }
+            };
+            reader.readAsText(f);
+          },
+        });
+
+        var textArea = el('textarea', {
+          class: 'pa-input', rows: 4,
+          placeholder: 'Or paste the training text here…',
+          value: draft.text,
+          onInput: function (e) { draft.text = e.target.value; draft.fileName = ''; fileNote.textContent = draft.text ? ui.fmtNum(draft.text.length) + ' chars' : 'no file selected'; },
+        });
+
+        var nameInput = el('input', {
+          class: 'pa-input', value: draft.name, placeholder: 'mymodel',
+          onInput: function (e) { draft.name = e.target.value; },
+        });
+
+        var sizeSel = el('select', { class: 'pa-select', onChange: function (e) { draft.size = e.target.value; } },
+          (sizes.length ? sizes : [{ id: 'small', label: '' }]).map(function (z) {
+            return el('option', {
+              value: z.id,
+              text: z.label ? z.id + ' — ' + z.label : z.id,
+              selected: z.id === draft.size,
+            });
           })
-          .catch(function (e) { flash('bad', 'Could not set default: ' + (e.message || e)); });
+        );
+
+        var stepsInput = el('input', {
+          class: 'pa-input', type: 'number', min: '1', max: '100000', step: '50', value: String(draft.steps),
+          onChange: function (e) {
+            var v = Number(e.target.value);
+            draft.steps = (!isNaN(v) && v >= 1) ? Math.min(100000, Math.round(v)) : 300;
+            e.target.value = String(draft.steps);
+          },
+        });
+
+        var backendSel = el('select', { class: 'pa-select', onChange: function (e) { draft.backend = e.target.value; } },
+          (backends.length ? backends : [{ id: '', label: '(server default)', available: true }]).map(function (b) {
+            return el('option', {
+              value: b.id,
+              text: b.label + (b.available === false ? ' — unavailable' : ''),
+              disabled: b.available === false,
+              selected: b.id === draft.backend,
+            });
+          })
+        );
+
+        var trainBtn = C.button(trainBusy ? 'Training…' : 'Train', { primary: true, disabled: trainBusy, onClick: onTrain });
+
+        return el('div', { class: 'pa-card pa-col pa-gap-4' },
+          el('div', { class: 'pa-col', style: { gap: '2px' } },
+            el('div', { class: 'pa-h3', text: 'Train a new model' }),
+            el('div', { class: ['pa-sm', 'pa-muted'], text: 'Pick a text file, choose a size, and train on your GPU. It appears in the chat model picker when done.' })
+          ),
+          el('div', { class: 'pa-row pa-wrap pa-gap-3' }, fileInput, fileNote),
+          textArea,
+          el('div', { class: 'pa-grid pa-grid-2' },
+            C.field('Name', nameInput),
+            C.field('Size', sizeSel),
+            C.field('Steps', stepsInput),
+            C.field('Backend', backendSel)
+          ),
+          el('div', { class: 'pa-row' }, trainBtn),
+          progress.root
+        );
       }
 
-      function doImport() {
-        var name = String(importName || '').trim();
-        if (!name) { flash('bad', 'Enter a HuggingFace repo id (e.g. HuggingFaceTB/SmolLM2-360M).'); return; }
-        // Stub: convert HF -> .ckpt. No endpoint yet — mock it optimistically.
-        showImport = false;
-        flash('accent', 'Import started for “' + name + '” — convert HF weights to a local checkpoint (stub).');
-        importName = '';
+      // ---- the tokenize probe modal ---------------------------------------------
+      function openTokenize(modelName) {
+        var result = el('div', { class: ['pa-sm', 'pa-muted'], style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' }, text: 'model: ' + modelName });
+        var input = el('input', {
+          class: 'pa-input', placeholder: 'Type text, press Enter…',
+          onKeydown: function (e) {
+            if (e.key !== 'Enter') return;
+            var text = (input.value || '').trim();
+            if (!text) return;
+            result.textContent = 'tokenizing…';
+            ctx.data().tokenize({ text: text, model: modelName }).then(function (r) {
+              var pieces = (r.tokens || []).slice(0, 64).map(function (t) { return t.text; });
+              var joined = pieces.join(' | ');
+              if (joined.length > 700) joined = joined.slice(0, 700) + '…';
+              result.textContent = r.count + ' tokens\n' + joined;
+            }).catch(function (err) {
+              result.textContent = 'Error: ' + (err.message || err);
+            });
+          },
+        });
+        C.openModal('Tokenize probe', el('div', { class: 'pa-col pa-gap-3' }, input, result));
+        input.focus();
       }
 
-      // ---- DATA + PAINT ----------------------------------------------------
-      // Pull the canonical model list from health() through the seam; fall back
-      // to whatever the store already cached so the view is never blank.
+      // ---- one model card ---------------------------------------------------------
+      function buildCard(info, isDefault) {
+        var titleRow = el('div', { class: 'pa-row pa-gap-3' },
+          el('span', { class: 'pa-mono', style: { fontWeight: '600', wordBreak: 'break-all' }, text: info.name }),
+          el('span', { class: 'pa-spacer' }),
+          isDefault ? C.badge('default', 'accent') : null,
+          info.instruct ? C.badge('instruct', 'good') : null
+        );
+
+        var meta = el('div', { class: ['pa-sm', 'pa-muted'], style: { wordBreak: 'break-word' }, text: describeMeta(info) });
+
+        var error = info.error
+          ? el('div', { class: 'pa-xs', style: { color: 'var(--pa-bad)' }, text: 'metadata unreadable: ' + info.error })
+          : null;
+
+        var actions = el('div', { class: 'pa-row pa-wrap pa-gap-3' },
+          C.button('💬  Chat with', {
+            ghost: true, small: true,
+            onClick: function () {
+              ctx.store.set({ selectedModel: info.name });
+              ctx.go('chat');
+            },
+          }),
+          C.button('⊟  Tokenize…', {
+            ghost: true, small: true,
+            onClick: function () { openTokenize(info.name); },
+          })
+        );
+
+        return el('div', { class: 'pa-card pa-col pa-gap-3' }, titleRow, meta, error, actions);
+      }
+
+      // ---- paint --------------------------------------------------------------------
       function paint() {
-        var st = ctx.store.get();
-        var defaultName = (st.settings && st.settings.app && st.settings.app.defaultModel)
-          || (st.health && st.health.default)
-          || st.selectedModel
-          || null;
-        var loadedNames = Object.keys(localLoaded).filter(function (k) { return localLoaded[k]; });
+        var s = ctx.store.get();
+        var infos = s.modelInfos && s.modelInfos.length
+          ? s.modelInfos
+          : (s.models || []).map(function (n) { // older server: names only
+              return { name: n, params: 0, layers: 0, ctx: 0, vocab: 0, tokenizer: '', dtype: '', step: 0, instruct: false, fileBytes: 0, error: null };
+            });
+        var defaultName = (s.health && s.health.default) || null;
 
-        var names = (st.models && st.models.length) ? st.models.slice() : [];
-        var models = names.map(function (n, i) { return deriveModel(n, i, defaultName, loadedNames); });
-
-        ui.mount(root, buildBody(models, defaultName));
-      }
-
-      function buildBody(models, defaultName) {
         var frag = el('div', { class: 'pa-col pa-gap-4' });
 
-        // Summary metrics row.
-        var loadedCount = models.filter(function (m) { return m.loaded; }).length;
-        var metrics = el('div', { class: 'pa-grid pa-grid-3' },
-          C.metricCard('Models', ui.fmtNum(models.length), 'available locally'),
-          C.metricCard('Loaded', ui.fmtNum(loadedCount), loadedCount ? 'resident in memory' : 'none resident'),
-          C.metricCard('Default', defaultName ? ui.truncate(defaultName, 22) : '—', 'used for new chats')
-        );
-        ui.append(frag, metrics);
-
-        // Optional inline status note.
-        if (note) {
-          ui.append(frag, el('div', { class: 'pa-row pa-gap-3' },
-            C.badge(note.tone === 'good' ? 'Done' : note.tone === 'bad' ? 'Error' : 'Note', note.tone),
-            el('span', { class: 'pa-sm pa-muted', text: note.text })
-          ));
-        }
-
-        // Convert / Import panel (toggled by the header action).
-        if (showImport) ui.append(frag, buildImportPanel());
-
-        // The model cards (grid, collapses to 1 col on mobile).
-        if (!models.length) {
-          ui.append(frag, C.emptyState(
-            'box-off', 'No models yet',
-            'Train a model or import one from HuggingFace to get started.',
-            C.button('Import HF model', { primary: true, icon: 'download', onClick: function () { showImport = true; paint(); } })
-          ));
+        if (!infos.length) {
+          ui.append(frag, C.emptyState('box-off', 'No models yet',
+            'Train one below, or convert a HuggingFace model with `projectai convert` and point --models at it.'));
         } else {
           var grid = el('div', { class: 'pa-grid pa-grid-2' });
-          models.forEach(function (m) { ui.append(grid, buildCard(m)); });
+          infos.forEach(function (info) { ui.append(grid, buildCard(info, info.name === defaultName)); });
           ui.append(frag, grid);
         }
 
-        return frag;
+        if (showTrain) ui.append(frag, buildTrainForm());
+        trainToggle.querySelector('span').textContent = showTrain ? '－  Hide training' : '＋  Train new model';
+
+        ui.mount(root, frag);
       }
 
-      // ---- One model card ---------------------------------------------------
-      function buildCard(m) {
-        // Header: name + status badge + default marker.
-        var statusBadge = m.loaded
-          ? C.badge('Loaded', 'good')
-          : C.badge('Idle', 'neutral');
-
-        var titleRow = el('div', { class: 'pa-row pa-gap-3' },
-          el('span', { class: 'pa-mono', style: { fontWeight: '600', wordBreak: 'break-all' }, text: m.name }),
-          el('span', { class: 'pa-spacer' }),
-          m.isDefault ? C.badge('Default', 'accent') : null,
-          statusBadge
-        );
-
-        // Meta row: family + kind + size + params (+ resident MB when loaded).
-        var meta = el('div', { class: 'pa-row pa-wrap pa-gap-3 pa-sm pa-muted' },
-          el('span', {}, ui.icon('cpu'), ' ' + m.family),
-          el('span', {}, ui.icon('adjustments'), ' ' + m.kind),
-          el('span', {}, ui.icon('ruler-2'), ' ' + m.sizeLabel),
-          el('span', {}, ui.icon('binary'), ' ' + fmtParams(m.params)),
-          m.residentMb != null
-            ? el('span', {}, ui.icon('database'), ' ' + ui.fmtNum(m.residentMb) + ' MB resident')
-            : null
-        );
-
-        // Actions row.
-        var actions = el('div', { class: 'pa-row pa-wrap pa-gap-3 pa-mt-3' },
-          C.button(m.loaded ? 'Unload' : 'Load', {
-            primary: !m.loaded, small: true,
-            icon: m.loaded ? 'player-eject' : 'player-play',
-            onClick: function () { doLoad(m); },
-          }),
-          C.button('Upgrade', {
-            ghost: true, small: true, icon: 'arrow-up-circle',
-            onClick: function () { doUpgrade(m); },
-          }),
-          C.button('Set default', {
-            ghost: true, small: true, icon: 'star',
-            disabled: m.isDefault,
-            onClick: function () { doSetDefault(m); },
-          })
-        );
-
-        return el('div', { class: 'pa-card pa-col pa-gap-3' }, titleRow, meta, actions);
-      }
-
-      // ---- Convert / Import HF panel (stub) --------------------------------
-      function buildImportPanel() {
-        var input = el('input', {
-          class: 'pa-input pa-mono',
-          placeholder: 'HuggingFaceTB/SmolLM2-360M-Instruct',
-          value: importName,
-          onInput: function (e) { importName = e.target.value; },
-        });
-
-        var bf16 = { on: true };
-        var bf16Toggle = C.toggle(bf16.on, function (v) { bf16.on = v; }, ['F32', 'BF16']);
-
-        var body = el('div', { class: 'pa-col pa-gap-4' },
-          el('div', { class: 'pa-grid pa-grid-2' },
-            C.field('HuggingFace repo id', input, 'A Llama-style repo with config.json + .safetensors'),
-            C.field('Precision', bf16Toggle, 'BF16 halves memory (GPU backends only)')
-          ),
-          el('div', { class: 'pa-row pa-wrap pa-gap-3' },
-            C.button('Import', { primary: true, icon: 'download', onClick: doImport }),
-            C.button('Cancel', { ghost: true, onClick: function () { showImport = false; paint(); } }),
-            el('span', { class: 'pa-spacer' }),
-            el('span', { class: 'pa-xs pa-muted', text: 'convert endpoint not on server yet — mocked' })
-          )
-        );
-
-        return el('div', { class: 'pa-card pa-col pa-gap-3' },
-          el('div', { class: 'pa-row pa-gap-3' },
-            ui.icon('download'),
-            el('span', { class: 'pa-h3', text: 'Import a HuggingFace model' })
-          ),
-          body
-        );
-      }
-
-      // ---- First paint. If the store has no models yet, probe health() -----
-      // through the seam so the view populates even on a cold mount.
-      var st0 = ctx.store.get();
+      // ---- first paint + a one-shot status probe (auto-reveal a running job) ------
       if (!(st0.models && st0.models.length)) {
-        ctx.data().health()
-          .then(function (h) {
-            if (h && h.ok) {
-              // Feed the store so nav/other views share it; store.set re-mounts.
-              ctx.store.set({
-                health: h,
-                models: h.models || [],
-                backends: h.backends || st0.backends || [],
-                sizes: h.sizes || st0.sizes || [],
-              });
-            } else {
-              paint();
-            }
-          })
-          .catch(function () { paint(); });
+        ctx.data().health().then(function (h) {
+          if (h && h.ok) {
+            ctx.store.set({
+              health: h,
+              models: h.models || [],
+              modelInfos: h.modelInfos || [],
+              backends: h.backends || st0.backends || [],
+              sizes: h.sizes || st0.sizes || [],
+            });
+            paint();
+          }
+        }).catch(function () { /* painted below */ });
       }
 
-      // Always paint immediately with whatever we have (never a blank frame).
+      ctx.data().trainStatus().then(function (s) {
+        if (root.isConnected && s.state === 'running') applyStatus(s);
+      }).catch(function () { /* no live job */ });
+
       paint();
+
+      // Catalog changes (health refresh) → repaint. Self-cleans when detached.
+      var unsub = ctx.store.subscribe(function () {
+        if (!root.isConnected) { unsub(); stopPolling(); return; }
+        paint();
+      });
     },
   });
 })(window.PA);

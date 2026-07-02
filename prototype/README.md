@@ -1,9 +1,9 @@
 # ProjectAI — Prototyping Harness
 
 A single-page, zero-build **UI prototyping harness** for the ProjectAI runtime. It renders
-the whole client — Chat, Models, Memory, Benchmark, Settings — as static HTML/CSS/vanilla JS,
-so you can design and iterate on screens with **the server completely off**, then flip a single
-toggle to run them against a live `projectai serve` instance.
+the whole client — Chat, Models, Benchmark, Memory, plus a Settings modal — as static
+HTML/CSS/vanilla JS, so you can design and iterate on screens with **the server completely
+off**, then flip a single toggle to run them against a live `projectai serve` instance.
 
 No framework, no bundler, no `npm install`. Just files and a browser.
 
@@ -13,7 +13,8 @@ No framework, no bundler, no `npm install`. Just files and a browser.
 
 - **Is:** a faithful, interactive mock of the desktop + mobile client. Every screen is fully
   usable against canned data. It exists to prototype *information architecture and interaction*
-  before (and alongside) the C# server growing the matching endpoints.
+  alongside the C# server, and is kept **1:1 with the shipping Godot client** — the client
+  (`Client/ai-client/`) is the source of truth for IA, copy, and behavior.
 - **Isn't:** the shipping client. The real front end is the Godot 4.7 C# app in
   `Client/ai-client/`. This harness mirrors that app's palette (`Ui/Palette.cs`) and IA so the
   two stay visually and structurally in sync.
@@ -48,12 +49,11 @@ The **Harness toolbar** across the top (outside the app itself) has a **Live / M
 switch:
 
 - **Mock (default):** every screen resolves its data from `js/mock.js` — realistic canned
-  payloads with small simulated delays and even simulated token streaming for Chat. Nothing hits
-  the network. This is how you prototype with the server off.
+  payloads with small simulated delays, simulated token streaming for Chat, and async simulated
+  background jobs for training and benchmark runs. Nothing hits the network.
 - **Live:** data flows to the real server at the toolbar's **base URL** via `js/api.js`
-  (`fetch` / `WebSocket`). Endpoints the server doesn't implement yet reject with a clear
-  *"endpoint not on server yet — use Mock"* error, which the affected screen surfaces as a
-  visible empty/error state rather than a blank page.
+  (`fetch` / `WebSocket`). **Every endpoint the harness uses exists on the server today** —
+  there is no mock-only screen anymore.
 
 To point at a server: type its URL into the toolbar (default `http://localhost:8080`), click
 **Connect**, then switch to **Live**. The choice is persisted to `localStorage`, so a reload
@@ -93,12 +93,31 @@ This is the core discipline of the harness:
   per server operation. It reads `PA.config.baseUrl` fresh on every call, so switching servers
   takes effect immediately.
 - **`js/mock.js`** exposes the **identical method surface** as `api.js`, returning canned data
-  with realistic shapes. It also defines **`PA.data()`** — the seam itself: it returns `PA.api`
-  in Live mode and `PA.mock` in Mock mode.
+  with the same payload shapes. It also defines **`PA.data()`** — the seam itself: it returns
+  `PA.api` in Live mode and `PA.mock` in Mock mode.
 - **Views and components call `PA.data()` (or `ctx.data()`) only.** They must never reference
   `PA.api` / `PA.mock` directly and must never call `fetch` / `WebSocket`. That single
   indirection is the entire boundary between "visuals" and "API integration" — a view cannot
   tell, and does not care, whether it's talking to a server or a mock.
+
+### The seam's method surface (all live on the server)
+
+| Seam method | Server route | Notes |
+|---|---|---|
+| `health()` | `GET /health` | models + **modelInfos** (real metadata) + backends + sizes + training/bench state |
+| `generate(req)` | `POST /generate` | non-streaming one-shot (chat uses the WS) |
+| `chat(handlers)` | `WS /chat` | `start` (memory rides this frame only) / `message` / `cancel`; `ready` → `handlers.onReady`, whitespace-preserving `token`s, the FULL `done` object; the server spells the cancel stop `canceled` |
+| `tokenize(req)` | `POST /tokenize` | `{text, model}` → count + pieces |
+| `train(req)` / `trainStatus()` | `POST /train`, `GET /train/status` | status nests under `training` — the seam unwraps it |
+| `benchSuites()` | `GET /benchmark/suites` | `[{id,label,caseCount,hasCorpus}]` |
+| `benchStart(req)` | `POST /benchmark` | `{suite,models,backend,repeats}` → 202 `{runId,total}` |
+| `benchStatus()` | `GET /benchmark/status` | nests under `bench` — the seam unwraps it |
+| `benchCancel()` | `POST /benchmark/cancel` | |
+| `benchRuns()` / `benchRun(id)` | `GET /benchmark/runs`, `GET /benchmark/run/{id}` | run cells with `caseId` `__bpb__` are bookkeeping — skip them |
+| `memoryList(req)` / `memoryRender(req)` | `GET /memory`, `GET /memory/render` | always `user=default`; stores are per model by convention |
+| `memoryPut(draft)` | `PUT /memory` | `{title,keys,body,tier,trust,user,store}` → `{id}` |
+| `configGet()` / `configPut(patch)` | `GET /config`, `PUT /config` | memory budgets; a 400 rejects with `err.data.problems` |
+| `secretPut(key, value)` / `secretDelete(key)` | `PUT/DELETE /config/secrets/{key}` | write-only; the response is always masked status |
 
 ### `tokens.css`: the single source of color
 
@@ -116,12 +135,12 @@ This is the core discipline of the harness:
 |---|---|
 | `js/config.js` | Establishes `window.PA`; loads/persists `{ baseUrl, useMock }`. Loaded first. |
 | `js/ui.js` | `PA.ui`: pure DOM helpers (`el`, `mount`, `icon`) + formatters. No I/O. |
-| `js/store.js` | `PA.store`: a tiny reactive store (health/models/backends/selection). No I/O. |
+| `js/store.js` | `PA.store`: a tiny reactive store (health/models/modelInfos/backends/selection). No I/O. |
 | `js/api.js` | `PA.api`: the only network file (see seam above). |
 | `js/mock.js` | `PA.mock` + `PA.data()`: canned data + the isolation seam. |
-| `js/components.js` | `PA.components`: reusable pure-view renderers (nav, cards, table, badges…). |
-| `js/views/*.js` | One screen each; self-register via `PA.registerView`. |
-| `js/app.js` | Runtime: view registry, shell, hash router, harness-toolbar wiring. Loaded last. |
+| `js/components.js` | `PA.components`: reusable pure-view renderers (nav rail + Server panel, cards, table, badges, modal, progress…). |
+| `js/views/*.js` | One screen each; self-register via `PA.registerView`. `settings.js` registers no view — it defines the `PA.settingsModal` overlay. |
+| `js/app.js` | Runtime: view registry, shell, hash router, harness-toolbar wiring, the rail's gear + Server panel. Loaded last. |
 
 ### How to add a screen
 
@@ -132,7 +151,7 @@ Drop a `js/views/x.js` that self-registers — **no other file needs editing**:
   PA.registerView('metrics', {
     title: 'Metrics',
     icon: 'chart-dots',   // Tabler icon name
-    order: 5,             // position in the nav (Chat=1 … Settings=6)
+    order: 5,             // position in the nav (Chat=1 … Memory=4)
     render: function (root, ctx) {
       // ctx.data()  -> the seam (mock or live)
       // ctx.store   -> reactive shared state
@@ -158,42 +177,23 @@ mobile — so no per-screen responsive code is needed.
 
 ---
 
-## Nav order
+## Screens
 
-The nav is driven entirely by each view's `order` field:
+The nav is driven entirely by each view's `order` field. Settings is **not** a routed view — it
+opens as a modal from the ⚙ gear pinned near the rail bottom, above the Server panel.
 
 | Order | Screen | Notes |
 |---|---|---|
-| 1 | Chat | Flagship working view: streaming transcript + composer. |
-| 2 | Models | Model cards, Load/Set-default, HF import panel (stub). |
-| 3 | Memory | Recall list, inject form, bridge preview. |
-| 4 | Benchmark | Suite/model config, comparison table, report/export. |
-| 6 | Settings | App / Models / Memory / Benchmark / Backends sections. |
+| 1 | Chat | Streaming transcript (WS), instruct badge + context meter, composer with model/backend pickers, 🧠 Memory + 🌐 Web chips, an Advanced popover (sampling / length / seed / text size), Send/Stop. |
+| 2 | Models | Card grid over `/health`'s **modelInfos** (real metadata), 💬 Chat with + ⊟ Tokenize…, and the inline "＋ Train new model" form with live progress. |
+| 3 | Benchmark | Define / Compare / Reports tabs: suites, model multi-select, repeats, live run progress with cancel, aggregates + case grid + side-by-side output modal, past runs. |
+| 4 | Memory | Store picker ("default" + one per model), search, the card catalog, the injection preview (bridge + recall), and the manual inject form. |
+| — | Settings (modal) | App (this machine) · Memory injection (server) · Web search (Tavily, write-only key). |
 
-`5` is intentionally left free for a future **Upgrade / Train** screen (it can reuse the training
-surface, or be omitted for now).
-
----
-
-## Which endpoints are mock-only (for now)
-
-`js/api.js` implements the endpoints the server already ships and **rejects** the rest with a
-clear error, so those screens visibly fall back to Mock:
-
-**Live on the server** (work in Live mode today):
-
-- `GET /health`, `POST /generate`, `WS /chat`, `POST /tokenize`, `POST /train`,
-  `GET /train/status`.
-
-**Mock-only until the server implements them** (reject in Live, fully usable in Mock):
-
-- **Benchmark:** `bench`, `benchStatus` — the whole Benchmark screen.
-- **Memory CRUD:** `memoryList`, `memoryGet`, `memoryPut`, `memorySupersede` — the Memory screen.
-- **Settings:** `settingsGet`, `settingsPut` — the Settings screen (and Models' "Set default").
-
-When one of these is exercised in Live mode, the affected screen shows an explicit
-*"endpoint not on server yet — switch to Mock"* state instead of failing silently. Prototype
-those screens in **Mock**; wire them to Live as the corresponding server endpoints land.
+The rail also carries the **Server panel** (client's ConnectionPanel): URL, Check connection,
+Start/Stop local server, status line. In **Live** the Start button is present but disabled —
+a browser can't spawn processes (run `projectai serve` yourself); in **Mock** it simulates the
+start flow ("Starting the server — loading the model…" → connected).
 
 ---
 
@@ -203,4 +203,7 @@ those screens in **Mock**; wire them to Live as the corresponding server endpoin
 - **Colors live only in `tokens.css`** — everything else uses `var(--pa-*)`.
 - **Mock mirrors the API surface** — every method a view calls exists on both `PA.api` and
   `PA.mock`, with matching shapes, so Live/Mock swaps require zero view changes.
-- **Secrets are write-only** — e.g. the Tavily key is masked, never echoed back to the client.
+- **The Godot client is the source of truth** — copy, badges, layouts, and wire shapes follow
+  `Client/ai-client/` and `ProjectAI/Server.cs`.
+- **Secrets are write-only** — the Tavily key is sent once and never echoed back; only masked
+  status (`{key, set, hint, source}`) ever reaches the client.
