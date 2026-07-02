@@ -1,10 +1,17 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 using Godot;
 
 // HttpRequest-backed IApiClient. Serializes requests, and turns transport/HTTP/parse failures into Ok=false results
-// so callers never have to branch on Godot error codes. HttpRequest serves one request at a time, so a single
-// in-flight continuation is enough; its completion signal fires on the main thread, making the events UI-safe.
+// so callers never have to branch on Godot error codes. Completion signals fire on the main thread, making the
+// events UI-safe.
+//
+// Concurrency: a small pool of HttpRequest nodes (each serves one request at a time) with two policies —
+// user actions queue for the next free slot (never dropped), status polls drop when a slot isn't free or the same
+// poll is already in flight (the timer retries; a stale poll result is worthless anyway). This replaces the old
+// single-slot client that silently dropped ANY call while busy — with several views sharing one client, an
+// invisible drop of a user action is no longer acceptable.
 //
 // Each endpoint is defined in ONE place: a Send(...) call that supplies how to turn a success body into its result
 // event and how to shape a failure for the same event. There is no central per-endpoint switch, so adding an
@@ -12,13 +19,21 @@ using Godot;
 public partial class ApiClient : Node, IApiClient
 {
     private static readonly string[] JsonHeaders = { "Content-Type: application/json" };
+    private const int PoolSize = 3;
 
-    private HttpRequest _http;
-    private Action<Godot.Collections.Dictionary> _onSuccess;
-    private Action<string> _onFailure;
+    private sealed record Pending(string Path, Godot.HttpClient.Method Method, string Body,
+        Action<Godot.Collections.Dictionary> OnSuccess, Action<string> OnFailure, bool Poll)
+    {
+        public string Url; // captured at dispatch, so a failure names the URL actually contacted (BaseUrl may have changed since)
+    }
+
+    private readonly List<HttpRequest> _idle = new();
+    private readonly Dictionary<HttpRequest, Pending> _active = new();
+    private readonly Queue<Pending> _waiting = new();       // user actions parked until a slot frees
+    private readonly HashSet<string> _pollsInFlight = new(); // dedupes polls by path
+    private int _healthSeq; // latest-wins guard: only the newest /health request may publish (they can race on the pool)
 
     public string BaseUrl { get; set; } = "http://localhost:8080";
-    public bool Busy { get; private set; }
 
     public event Action<HealthResult> HealthReceived;
     public event Action<TrainStartResult> TrainStarted;
@@ -26,15 +41,32 @@ public partial class ApiClient : Node, IApiClient
 
     public override void _Ready()
     {
-        _http = new HttpRequest { Name = "Http" };
-        AddChild(_http);
-        _http.RequestCompleted += OnCompleted;
+        for (int i = 0; i < PoolSize; i++)
+        {
+            // A finite timeout so a hung request can't hold a pool slot for the OS connect timeout (~20s); matches
+            // the server's own 30s entity-body window.
+            var http = new HttpRequest { Name = $"Http{i}", Timeout = 30 };
+            AddChild(http);
+            var slot = http; // capture the node, not the loop variable's final value
+            http.RequestCompleted += (result, code, _, body) => OnCompleted(slot, result, code, body);
+            _idle.Add(http);
+        }
+        // Anything sent before this node entered the tree was parked in _waiting; drain it now that slots exist.
+        while (_waiting.Count > 0 && _idle.Count > 0) Dispatch(_waiting.Dequeue());
     }
 
-    public void CheckHealth() => Send(
-        "/health", Godot.HttpClient.Method.Get, null,
-        data => HealthReceived?.Invoke(ParseHealth(data)),
-        error => HealthReceived?.Invoke(new HealthResult(false, [], "", [], "", [], error)));
+    // Two /health requests can race on the pool (e.g. Check clicked twice around a URL edit, or the automatic
+    // refresh after training). Only the NEWEST one may publish — a stale straggler must not overwrite fresh
+    // connection state or repopulate the pickers from a server the app no longer points at.
+    public void CheckHealth()
+    {
+        int seq = ++_healthSeq;
+        Send(new Pending(
+            "/health", Godot.HttpClient.Method.Get, null,
+            data => { if (seq == _healthSeq) HealthReceived?.Invoke(ParseHealth(data)); },
+            error => { if (seq == _healthSeq) HealthReceived?.Invoke(new HealthResult(false, [], "", [], "", [], error)); },
+            Poll: false));
+    }
 
     public void StartTraining(TrainRequest request)
     {
@@ -47,39 +79,52 @@ public partial class ApiClient : Node, IApiClient
         };
         if (!string.IsNullOrEmpty(request.Backend)) body["backend"] = request.Backend;
 
-        Send("/train", Godot.HttpClient.Method.Post, Json.Stringify(body),
+        Send(new Pending("/train", Godot.HttpClient.Method.Post, Json.Stringify(body),
             _ => TrainStarted?.Invoke(new TrainStartResult(true, null)),
-            error => TrainStarted?.Invoke(new TrainStartResult(false, error)));
+            error => TrainStarted?.Invoke(new TrainStartResult(false, error)),
+            Poll: false));
     }
 
-    public void CheckTrainStatus() => Send(
+    // A poll: dropped when its slot isn't free — the 1.5s timer simply asks again.
+    public void CheckTrainStatus() => Send(new Pending(
         "/train/status", Godot.HttpClient.Method.Get, null,
         data => TrainStatusReceived?.Invoke(ParseTrainStatus(data)),
-        error => TrainStatusReceived?.Invoke(new TrainStatus("error", "", 0, 0, 0f, error)));
+        error => TrainStatusReceived?.Invoke(new TrainStatus("error", "", 0, 0, 0f, error)),
+        Poll: true));
 
-    // Starts one request, remembering how to finish it. Ignored if a request is already in flight (HttpRequest is
-    // single-shot). body == null sends no payload (GET); otherwise it's the JSON string for a POST.
-    private void Send(string path, Godot.HttpClient.Method method, string body,
-                      Action<Godot.Collections.Dictionary> onSuccess, Action<string> onFailure)
+    private void Send(Pending pending)
     {
-        if (Busy) return;
-        _onSuccess = onSuccess;
-        _onFailure = onFailure;
-        Busy = true;
-
-        Error started = body == null
-            ? _http.Request(Url(path), JsonHeaders, method)
-            : _http.Request(Url(path), JsonHeaders, method, body);
-        if (started != Error.Ok) Fail("Could not start request.");
+        if (pending.Poll)
+        {
+            if (_pollsInFlight.Contains(pending.Path) || _idle.Count == 0) return;
+            _pollsInFlight.Add(pending.Path);
+            Dispatch(pending);
+            return;
+        }
+        if (_idle.Count == 0) { _waiting.Enqueue(pending); return; }
+        Dispatch(pending);
     }
 
-    private void OnCompleted(long result, long code, string[] headers, byte[] body)
+    private void Dispatch(Pending pending)
+    {
+        var http = _idle[^1];
+        _idle.RemoveAt(_idle.Count - 1);
+        _active[http] = pending;
+        pending.Url = Url(pending.Path);
+
+        Error started = pending.Body == null
+            ? http.Request(pending.Url, JsonHeaders, pending.Method)
+            : http.Request(pending.Url, JsonHeaders, pending.Method, pending.Body);
+        if (started != Error.Ok) Finish(http, null, "Could not start request.");
+    }
+
+    private void OnCompleted(HttpRequest http, long result, long code, byte[] body)
     {
         if ((HttpRequest.Result)result != HttpRequest.Result.Success)
         {
             // Surface the specific Godot transport result (CantConnect / CantResolve / Timeout …) so a failure is
-            // diagnosable instead of a generic "failed".
-            Fail($"Can't reach {BaseUrl} — {(HttpRequest.Result)result}. Is `projectai serve` running on that port?");
+            // diagnosable instead of a generic "failed". Names the URL this request actually contacted.
+            Finish(http, null, $"Can't reach {_active[http].Url} — {(HttpRequest.Result)result}. Is `projectai serve` running on that port?");
             return;
         }
 
@@ -88,33 +133,25 @@ public partial class ApiClient : Node, IApiClient
         if (json.Parse(Encoding.UTF8.GetString(body)) == Error.Ok && json.Data.VariantType == Variant.Type.Dictionary)
             data = json.Data.AsGodotDictionary();
 
-        if (data == null) { Fail($"Unreadable response (HTTP {code})."); return; }
+        if (data == null) { Finish(http, null, $"Unreadable response (HTTP {code})."); return; }
         // 202 (train accepted) is success too; anything outside 2xx is an error (with the server's message if present).
-        if (code is < 200 or >= 300) { Fail(data.ContainsKey("error") ? data.Str("error") : $"HTTP {code}"); return; }
-        Succeed(data);
+        if (code is < 200 or >= 300) { Finish(http, null, data.ContainsKey("error") ? data.Str("error") : $"HTTP {code}"); return; }
+        Finish(http, data, null);
     }
 
-    // Go idle, then invoke the stored success/failure continuation. Capturing it BEFORE clearing lets a handler that
-    // immediately fires another request (which sets new continuations) do so safely.
-    private void Succeed(Godot.Collections.Dictionary data)
+    // Returns the slot to the pool, delivers this request's result, THEN starts the next queued action — so events
+    // stay FIFO (a queued request whose start fails synchronously must not report before the request that freed it).
+    private void Finish(HttpRequest http, Godot.Collections.Dictionary data, string error)
     {
-        var cont = _onSuccess;
-        GoIdle();
-        cont?.Invoke(data);
-    }
+        var pending = _active[http];
+        _active.Remove(http);
+        _idle.Add(http);
+        if (pending.Poll) _pollsInFlight.Remove(pending.Path);
 
-    private void Fail(string error)
-    {
-        var cont = _onFailure;
-        GoIdle();
-        cont?.Invoke(error);
-    }
+        if (error != null) pending.OnFailure?.Invoke(error);
+        else pending.OnSuccess?.Invoke(data);
 
-    private void GoIdle()
-    {
-        _onSuccess = null;
-        _onFailure = null;
-        Busy = false;
+        if (_waiting.Count > 0 && _idle.Count > 0) Dispatch(_waiting.Dequeue());
     }
 
     private static HealthResult ParseHealth(Godot.Collections.Dictionary data)

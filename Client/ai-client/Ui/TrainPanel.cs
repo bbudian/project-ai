@@ -14,8 +14,7 @@ public partial class TrainPanel : PanelContainer
     private SpinBox _steps;
     private Button _train;
     private Label _fileLabel;
-    private Label _statusLabel;
-    private ProgressBar _progress;
+    private ProgressRow _progress;
     private FileDialog _fileDialog;
     private string _text = "";
 
@@ -63,10 +62,8 @@ public partial class TrainPanel : PanelContainer
         _train.Pressed += OnTrain;
         col.AddChild(_train);
 
-        _progress = new ProgressBar { MinValue = 0, MaxValue = 100, Value = 0, ShowPercentage = false, CustomMinimumSize = new Vector2(0, 16) };
+        _progress = new ProgressRow();
         col.AddChild(_progress);
-        _statusLabel = Palette.Heading("", 13, Palette.Muted);
-        col.AddChild(_statusLabel);
 
         _fileDialog = new FileDialog
         {
@@ -115,24 +112,20 @@ public partial class TrainPanel : PanelContainer
         switch (s.State)
         {
             case "running":
-                _progress.Value = s.TotalSteps > 0 ? 100.0 * s.Step / s.TotalSteps : 0;
-                _statusLabel.AddThemeColorOverride("font_color", Palette.Muted);
-                _statusLabel.Text = $"Training '{s.Name}'…  step {s.Step}/{s.TotalSteps},  loss {s.Loss:0.000}";
+                _progress.SetPercent(s.TotalSteps > 0 ? 100.0 * s.Step / s.TotalSteps : 0);
+                _progress.SetStatus($"Training '{s.Name}'…  step {s.Step}/{s.TotalSteps},  loss {s.Loss:0.000}", Palette.Muted);
                 break;
             case "done":
-                _progress.Value = 100;
-                _statusLabel.AddThemeColorOverride("font_color", Palette.Good);
-                _statusLabel.Text = $"Done — '{s.Name}' trained (loss {s.Loss:0.000}). Switch to Chat and pick it.";
+                _progress.SetPercent(100);
+                _progress.SetStatus($"Done — '{s.Name}' trained (loss {s.Loss:0.000}). Switch to Chat and pick it.", Palette.Good);
                 break;
             case "error":
-                _statusLabel.AddThemeColorOverride("font_color", Palette.Bad);
-                _statusLabel.Text = $"Error: {s.Error}";
+                _progress.SetStatus($"Error: {s.Error}", Palette.Bad);
                 break;
             default: // "idle" (e.g. the server restarted and lost the job) or any unrecognized state
-                _statusLabel.AddThemeColorOverride("font_color", Palette.Muted);
-                _statusLabel.Text = string.IsNullOrEmpty(s.Error)
+                _progress.SetStatus(string.IsNullOrEmpty(s.Error)
                     ? "Training is no longer running on the server."
-                    : $"Error: {s.Error}";
+                    : $"Error: {s.Error}", Palette.Muted);
                 break;
         }
     }
@@ -142,8 +135,7 @@ public partial class TrainPanel : PanelContainer
         using var file = Godot.FileAccess.Open(path, Godot.FileAccess.ModeFlags.Read);
         if (file is null)
         {
-            _statusLabel.AddThemeColorOverride("font_color", Palette.Bad);
-            _statusLabel.Text = "Could not read that file.";
+            Warn("Could not read that file.");
             return;
         }
         _text = file.GetAsText();
@@ -162,11 +154,7 @@ public partial class TrainPanel : PanelContainer
         TrainRequested?.Invoke(new TrainRequest(name, _text, SelectedSize(), (int)_steps.Value, _backend.SelectedId));
     }
 
-    private void Warn(string message)
-    {
-        _statusLabel.AddThemeColorOverride("font_color", Palette.Bad);
-        _statusLabel.Text = message;
-    }
+    private void Warn(string message) => _progress.SetStatus(message, Palette.Bad);
 
     private string SelectedSize() => _size.Selected >= 0 ? _size.GetItemMetadata(_size.Selected).AsString() : "small";
 

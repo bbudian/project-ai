@@ -7,7 +7,6 @@ using System;
 public interface IApiClient
 {
     string BaseUrl { get; set; }
-    bool Busy { get; }
     void CheckHealth();
     void StartTraining(TrainRequest request);
     void CheckTrainStatus();

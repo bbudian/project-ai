@@ -1,0 +1,141 @@
+using Godot;
+
+// The Chat destination: recents context panel | (title header, transcript, composer). Owns the chat session
+// state machine and its streaming transport (ChatSocket) — moved out of Main so the shell stays wiring-only.
+// The socket and transcript live as long as the app: switching destinations hides this view without dropping
+// the server's warm KV cache or the conversation on screen.
+public partial class ChatView : HBoxContainer, IView
+{
+    private readonly AppState _state;
+
+    private RecentsPanel _recents;
+    private Transcript _transcript;
+    private Composer _composer;
+    private Label _title;
+    private ChatSocket _chat;
+    private TurnCard _activeTurn;
+    private string _sessionModel = "", _sessionBackend = "";
+    private bool _chatBusy;
+    private bool _resetSession;
+
+    public ChatView(AppState state) => _state = state;
+
+    public Control Root => this;
+    public void OnShown() { }  // nothing to start: streaming continues while hidden so a reply isn't lost
+    public void OnHidden() { }
+
+    public override void _Ready()
+    {
+        SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        SizeFlagsVertical = SizeFlags.ExpandFill;
+        AddThemeConstantOverride("separation", 0);
+
+        _recents = new RecentsPanel();
+        AddChild(_recents);
+
+        var column = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        column.AddThemeConstantOverride("separation", 0);
+        AddChild(column);
+
+        var header = new PanelContainer();
+        Palette.StylePanel(header, Palette.AppBg, pad: 14);
+        header.AddChild(_title = Palette.Heading("New chat", Palette.Type.H3));
+        column.AddChild(header);
+
+        column.AddChild(Palette.Pad(_transcript = new Transcript(), left: 24, right: 24, top: 8, bottom: 8, expand: true));
+        column.AddChild(Palette.Pad(_composer = new Composer(), left: 16, right: 16, top: 8, bottom: 16));
+
+        _chat = new ChatSocket();
+        AddChild(_chat);
+
+        _chat.Token += delta => { _activeTurn?.Append(delta); _transcript.ScrollToBottom(); };
+        _chat.Sources += sources => { _activeTurn?.SetSources(sources); _transcript.ScrollToBottom(); };
+        _chat.Done += OnChatDone;
+        _chat.ChatError += OnChatError;
+        _chat.Closed += OnChatClosed;
+
+        _composer.Submitted += OnSubmit;
+        _composer.Canceled += OnCancel;
+        _composer.FontSizeChanged += size => _transcript.SetFontSize(size);
+
+        _recents.NewChatRequested += OnNewChat;
+        _recents.RecentSelected += prompt => _composer.SetPrompt(prompt);
+
+        _state.HealthChanged += OnHealth;
+        OnHealth(); // render whatever state already exists — a view registered after the first /health must not start empty
+    }
+
+    private void OnHealth()
+    {
+        if (_state.Health is not { Ok: true } health) return;
+        _composer.SetModels(health.Models, health.Default);
+        _composer.SetBackends(health.Backends, health.DefaultBackend);
+    }
+
+    private void OnSubmit(GenerateRequest request)
+    {
+        if (_chatBusy) return;
+        _activeTurn = _transcript.Begin(request.Prompt);
+        _recents.AddRecent(request.Prompt);
+        _title.Text = Format.Ellipsize(request.Prompt, 40);
+        _composer.SetBusy(true);
+        _chatBusy = true;
+        _state.SetSelection(request.Model, request.Backend);
+
+        // One persistent /chat connection keeps the server's KV cache warm across turns. (Re)start the session when
+        // first connecting, when the model/backend changed, or after "New chat" cleared the conversation.
+        if (!_chat.IsActive) { _chat.Connect(_state.ServerUrl); _resetSession = true; }
+        if (_resetSession || request.Model != _sessionModel || request.Backend != _sessionBackend)
+        {
+            _chat.SendStart(request.Model, request.Backend);
+            _sessionModel = request.Model;
+            _sessionBackend = request.Backend;
+            _resetSession = false;
+        }
+        _chat.SendMessage(request);
+    }
+
+    // Stop button: ask the server to halt generation. It stops at the next token and replies with a "done"
+    // (stop=canceled), which flows through OnChatDone to keep the partial reply and re-enable the composer.
+    private void OnCancel()
+    {
+        if (_chatBusy) _chat.Cancel();
+    }
+
+    private void OnChatDone(string stop)
+    {
+        _activeTurn?.Complete(stop);
+        _transcript.ScrollToBottom();
+        _activeTurn = null;
+        _chatBusy = false;
+        _composer.SetBusy(false);
+    }
+
+    private void OnChatError(string error)
+    {
+        _activeTurn?.Fail(error);
+        _activeTurn = null;
+        _chatBusy = false;
+        _composer.SetBusy(false);
+    }
+
+    private void OnChatClosed()
+    {
+        // Connection dropped: fail any in-flight turn and force a fresh session (new warm cache) on the next message.
+        if (_chatBusy)
+        {
+            _activeTurn?.Fail("Chat connection closed — is `projectai serve` running?");
+            _activeTurn = null;
+            _chatBusy = false;
+            _composer.SetBusy(false);
+        }
+        _resetSession = true;
+    }
+
+    private void OnNewChat()
+    {
+        _transcript.Clear();
+        _title.Text = "New chat";
+        _resetSession = true; // next message starts a fresh server session (drops the warm cache)
+    }
+}
