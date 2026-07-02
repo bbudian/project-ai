@@ -24,7 +24,11 @@ public static class Inference
         IComputeBackend be, LlamaModel model, ITokenizer tokenizer, ModelConfig config,
         string prompt, ISampler sampler, int maxTokens)
     {
-        int vocab = tokenizer.VocabSize, eos = tokenizer.EosId;
+        // The logits' last axis is config.VocabSize (the embedding rows), which HF models often pad past the
+        // tokenizer's max id — so row arithmetic MUST use the model width, and the sample window is capped at the
+        // tokenizer's ids so a padded (undecodable) id can never be emitted.
+        int rowWidth = config.VocabSize, sampleWidth = Math.Min(tokenizer.VocabSize, config.VocabSize);
+        int eos = tokenizer.EosId;
         var generated = new List<int>(tokenizer.Encode(prompt));
         if (generated.Count == 0) generated.Add((int)' ');           // empty prompt → start from a space
         if (generated.Count >= config.MaxSequenceLength)             // keep room under the RoPE table length
@@ -43,7 +47,7 @@ public static class Inference
             int produced = 0;
             while (true)
             {
-                int next = SampleLast(be, logits, vocab, sampler);
+                int next = SampleLast(be, logits, rowWidth, sampleWidth, sampler);
                 if (next == eos) { stopReason = "eos"; break; }
                 generated.Add(next);
                 if (++produced >= maxTokens) { stopReason = "maxTokens"; break; }
@@ -59,13 +63,14 @@ public static class Inference
         return new GenerationResult(continuation, fullText, promptTokens, generated.Count - promptTokens, stopReason);
     }
 
-    // Samples from the last row of a [1, rows, vocab] logits tensor (the only row on a decode step).
-    private static int SampleLast(IComputeBackend be, Tensor logits, int vocab, ISampler sampler)
+    // Samples from the last row of a [1, rows, rowWidth] logits tensor (the only row on a decode step).
+    // rowWidth = the model's vocab (the tensor's true last axis); sampleWidth ≤ rowWidth windows out padded ids.
+    private static int SampleLast(IComputeBackend be, Tensor logits, int rowWidth, int sampleWidth, ISampler sampler)
     {
         var host = new float[logits.ElementCount];
         be.ToHost(logits, host);
-        int rows = host.Length / vocab;
-        return sampler.Sample(host.AsSpan((rows - 1) * vocab, vocab));
+        int rows = host.Length / rowWidth;
+        return sampler.Sample(host.AsSpan((rows - 1) * rowWidth, sampleWidth));
     }
 
     private static float[] ToFloats(IReadOnlyList<int> ids)

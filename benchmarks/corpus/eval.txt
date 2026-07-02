@@ -1,0 +1,60 @@
+The lighthouse keeper kept two logbooks. The first recorded what the sea did: the height of the swells, the color of the morning water, which gulls returned after the storms. The second recorded what the keeper did about it, and it was much shorter. Most days the correct response to the sea was to watch it and write nothing down.
+
+Engineers rediscover this lesson in every discipline. A monitoring system that pages a human for every anomaly trains the humans to ignore the pages. The skill is not detection; detection is cheap. The skill is deciding which observations obligate a response, and having the honesty to let the rest pass unremarked.
+
+When the ferry ran aground in the fog of 1931, the inquiry blamed the keeper for a lamp that had been burning the whole night. The lamp was not the problem. The ferry's captain had never learned to distrust his own certainty, and certainty is the one hazard a lighthouse cannot illuminate.
+
+---
+
+def pack_blocks(tokens, block_size):
+    """Pack a token stream into fixed-size next-token blocks.
+
+    The last partial block is dropped rather than padded: padding would
+    teach the model that documents end in filler, and the loss masking
+    needed to avoid that costs more than the tail is worth.
+    """
+    blocks = []
+    for start in range(0, len(tokens) - block_size, block_size):
+        blocks.append(tokens[start : start + block_size + 1])
+    return blocks
+
+class RollingMedian:
+    def __init__(self, window):
+        self.window = window
+        self.values = []
+
+    def push(self, x):
+        self.values.append(x)
+        if len(self.values) > self.window:
+            self.values.pop(0)
+        ordered = sorted(self.values)
+        mid = len(ordered) // 2
+        if len(ordered) % 2:
+            return ordered[mid]
+        return (ordered[mid - 1] + ordered[mid]) / 2
+
+---
+
+"You measured it twice," said Imani, not looking up from the terminal.
+"Three times," said Petra. "The third run was slower."
+"Slower how?"
+"Eleven percent. Same seed, same batch, same everything."
+Imani finally looked up. "Same everything means same numbers. Eleven percent is not noise on this machine. What did you change and forget you changed?"
+Petra scrolled back through the shell history and went quiet for a moment. "The power cable," she said. "I moved the laptop to the couch."
+"So it throttled." Imani turned back to her screen. "Write it in the report anyway. The most useful line in any benchmark is the one that explains the number you almost didn't publish."
+
+---
+
+A tokenizer is a contract between text and arithmetic. Byte-level schemes promise that no string is ever out of vocabulary: every character, emoji, or typo decomposes into bytes the model has seen. The price is longer sequences — a word like "extraordinary" that a learned vocabulary might treat as one token costs a byte-level model thirteen predictions, each one a chance to go wrong and a step of compute to pay for.
+
+Learned merges invert the bargain. Frequent words collapse into single tokens and the sequence shortens, but the vocabulary hardens into a snapshot of its training corpus. Ask a code-trained tokenizer to carry Burmese poetry and it will not refuse; it will simply spend bytes the way a tourist spends unfamiliar currency, one small denomination at a time, trusting the model downstream to reassemble meaning from fragments it was never taught to expect.
+
+The honest comparison between two such systems is therefore never tokens per second. It is bits per byte of the original text: how much uncertainty remains, per unit of human writing, after the model has said everything it can. On that scale the tokenizer's cleverness and the model's knowledge are priced in the same currency, and neither can hide behind the other.
+
+---
+
+Q: Why does the recipe say to rest the dough overnight?
+A: Two reasons. Fermentation continues in the cold, developing acids that flavor the crumb, and the flour finishes hydrating so the gluten relaxes — which is why rested dough stretches instead of snapping back.
+
+Q: Can I skip it?
+A: You can bake after two hours and get bread. It will be paler, blander, and harder to shape. The recipe is not lying to you; it is just telling you where the flavor comes from.

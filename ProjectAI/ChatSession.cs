@@ -137,11 +137,14 @@ internal sealed class ChatSession
 
     private int SampleLast(Tensor logits, ISampler sampler)
     {
-        int vocab = _tok.VocabSize;
+        // The logits' last axis is config.VocabSize (the embedding rows), which HF models often pad past the
+        // tokenizer's max id — so row arithmetic MUST use the model width, and the sample window is capped at the
+        // tokenizer's ids so a padded (undecodable) id can never be emitted.
+        int rowWidth = _config.VocabSize, sampleWidth = Math.Min(_tok.VocabSize, _config.VocabSize);
         var host = new float[logits.ElementCount];
         _be.ToHost(logits, host);
-        int rows = host.Length / vocab;
-        return sampler.Sample(host.AsSpan((rows - 1) * vocab, vocab));
+        int rows = host.Length / rowWidth;
+        return sampler.Sample(host.AsSpan((rows - 1) * rowWidth, sampleWidth));
     }
 
     private int SingleToken(string s)

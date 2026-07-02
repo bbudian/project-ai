@@ -81,8 +81,14 @@ switch (command)
         RunConvertDataset(opts);
         break;
     }
+    case "bench":
+    {
+        var opts = ParseCliOptions(args.Length > 1 ? args[1..] : []);
+        RunBench(backend, backendId, opts);
+        break;
+    }
     default:
-        Console.WriteLine("Usage: projectai <demo|train|generate|tokenize|serve|convert>");
+        Console.WriteLine("Usage: projectai <demo|train|generate|tokenize|serve|convert|bench>");
         Console.WriteLine("  demo            Stage 0 milestone: fit y = Wx + b with our own autograd + AdamW.");
         Console.WriteLine("  train [prompt] [--name M] [--data <file>] [--steps N] [--batch B] [--seqlen S] [--lr X] [--temp T] [--topk K] [--topp P] [--seed S]");
         Console.WriteLine("                  No --data: train a tiny LLaMA on a built-in corpus. With --data <file>: train on");
@@ -100,6 +106,10 @@ switch (command)
         Console.WriteLine("  convert-dataset --input <text-file> [--output <dir>] [--seqlen S] [--format text]");
         Console.WriteLine("                  Pre-tokenize a corpus into a packed token-id dataset (mmap'd at train time),");
         Console.WriteLine("                  then train on it with: train --data <dir>.");
+        Console.WriteLine("  bench <model> [model2 …] [--suite baseline] [--models <dir>] [--repeats N] [--seed S]");
+        Console.WriteLine("                  Benchmark models against a suite: bpb over the suite's held-out corpus (the");
+        Console.WriteLine("                  cross-tokenizer quality signal), median tok/s (1 warmup discarded), and greedy");
+        Console.WriteLine("                  deterministic checks. Writes run JSON + a markdown report under <models>/benchmarks/.");
         Console.WriteLine();
         Console.WriteLine("  Global:  --backend cpu|torch   Pick the compute backend (default cpu).");
         Console.WriteLine("           --device cpu|cuda|metal Device for the torch backend (default cpu; cuda needs a libtorch bundle).");
@@ -159,6 +169,8 @@ static CliOptions ParseCliOptions(string[] rest)
     bool bf16 = false;
     string? input = null, output = null;
     string format = "text";
+    string suite = "baseline";
+    int repeats = 3;
     var promptParts = new List<string>();
 
     for (int i = 0; i < rest.Length; i++)
@@ -184,6 +196,8 @@ static CliOptions ParseCliOptions(string[] rest)
             case "--input": input = ParseStringFlag(rest, ref i, tok); break;   // convert-dataset: source corpus
             case "--output": output = ParseStringFlag(rest, ref i, tok); break; // convert-dataset: dataset dir
             case "--format": format = ParseStringFlag(rest, ref i, tok); break; // convert-dataset: text|parquet|jsonl
+            case "--suite": suite = ParseStringFlag(rest, ref i, tok); break;   // bench: suite id or file path
+            case "--repeats": repeats = ParseIntFlag(rest, ref i, tok); break;  // bench: timed repeats (median)
             // Consumed at the composition root (CreateBackend); accepted here so they aren't flagged as unknown.
             case "--backend": _ = ParseStringFlag(rest, ref i, tok); break;
             case "--device": _ = ParseStringFlag(rest, ref i, tok); break;
@@ -202,6 +216,7 @@ static CliOptions ParseCliOptions(string[] rest)
     if (seqLen < 1 || seqLen > 8192) Fail("--seqlen must be in [1, 8192]"); // cap RoPE-table / memory blow-up
     if (lr <= 0f) Fail("--lr must be > 0");
     if (port is < 1 or > 65535) Fail("--port must be in [1, 65535]");
+    if (repeats is < 1 or > 20) Fail("--repeats must be in [1, 20]");
     if (name.Length == 0 || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name != Path.GetFileName(name))
         Fail("--name must be a simple file name (no path separators)");
 
@@ -209,7 +224,7 @@ static CliOptions ParseCliOptions(string[] rest)
     ISampler sampler = sample
         ? new TopKTopPSampler(new PcgRng(seed), temperature, topK, topP)
         : new GreedySampler();
-    return new CliOptions(prompt, sampler, load, data, models, name, steps, batch, seqLen, lr, port, bf16, input, output, format, memory);
+    return new CliOptions(prompt, sampler, load, data, models, name, steps, batch, seqLen, lr, port, bf16, input, output, format, memory, suite, repeats, seed);
 
     static float ParseFloatFlag(string[] a, ref int i, string flag)
     {
@@ -385,6 +400,60 @@ static void RunConvertDataset(CliOptions opts)
     Console.WriteLine($"  {manifest.TotalTokens:N0} tokens → {manifest.BlockCount:N0} blocks of {manifest.SequenceLength + 1} ids ({manifest.Dtype}); {manifest.DroppedTokens} dropped.");
     Console.WriteLine($"Wrote {Path.Combine(outputDir, DatasetManifest.FileName)}");
     Console.WriteLine($"Train on it:  train --data {outputDir} --steps {opts.Steps} --batch {opts.Batch}");
+}
+
+// `bench`: the accuracy instrument. Model names ride the positional args; decoding is greedy (the v1 rigor rule —
+// checks must reproduce), seed applies to the run identity (0 → the canonical 12345 so a bare `bench` is stable).
+static void RunBench(IComputeBackend backend, string backendId, CliOptions opts)
+{
+    string modelsDir = opts.Models ?? "checkpoints";
+    // Positional args are model names; "roses are " is ParseCliOptions's default prompt, i.e. "none given".
+    string[] modelNames = opts.Prompt == "roses are "
+        ? []
+        : opts.Prompt.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    if (modelNames.Length == 0)
+    {
+        Console.Error.WriteLine("error: bench needs at least one model name.");
+        Console.Error.WriteLine("usage: projectai bench <model> [model2 …] [--suite baseline] [--models <dir>] [--repeats N]");
+        Environment.Exit(2);
+        return;
+    }
+    foreach (string m in modelNames)
+        if (!File.Exists(Path.Combine(modelsDir, m + ".ckpt")))
+        {
+            Console.Error.WriteLine($"error: no checkpoint '{m}.ckpt' in '{modelsDir}' (--models to point elsewhere).");
+            Environment.Exit(2);
+            return;
+        }
+
+    ProjectAI.Bench.BenchSuite suite;
+    try { suite = ProjectAI.Bench.SuiteLoader.Load(opts.Suite, modelsDir); }
+    catch (Exception ex) when (ex is FileNotFoundException or InvalidDataException)
+    {
+        Console.Error.WriteLine($"error: {ex.Message}");
+        Environment.Exit(2);
+        return;
+    }
+
+    var config = new ProjectAI.Bench.BenchRunConfig(
+        suite.Id, modelNames, backendId, Seed: opts.Seed == 0 ? 12345 : opts.Seed, Sample: false, Repeats: opts.Repeats);
+    Console.WriteLine($"Benchmark: suite '{suite.Id}' — {suite.Cases.Count} cases{(suite.EvalCorpus is null ? "" : " + bpb corpus")}, " +
+                      $"{modelNames.Length} model(s), backend {backendId}, greedy, repeats {opts.Repeats} (+1 warmup)");
+
+    var run = ProjectAI.Bench.BenchRunner.Run(backend, backendId, modelsDir, suite, config,
+        (model, caseId, done, total) => Console.WriteLine($"  [{done + 1}/{total}] {model} · {caseId}"));
+
+    string runPath = ProjectAI.Bench.BenchRunner.SaveRun(modelsDir, run);
+    string report = ProjectAI.Bench.BenchReporter.Markdown(run);
+    string reportDir = Path.Combine(modelsDir, "benchmarks", "reports");
+    Directory.CreateDirectory(reportDir);
+    string reportPath = Path.Combine(reportDir, run.Id + ".md");
+    File.WriteAllText(reportPath, report);
+
+    Console.WriteLine();
+    Console.WriteLine(report);
+    Console.WriteLine($"Run JSON: {runPath}");
+    Console.WriteLine($"Report:   {reportPath}");
 }
 
 // Trains on a packed dataset directory (manifest + .bin). Sequence length, vocab size, and the tokenizer are read
@@ -608,4 +677,4 @@ static void RunStage0Demo(IComputeBackend be)
 // data file + hyperparameters (train --data), and the serve port.
 internal sealed record CliOptions(
     string Prompt, ISampler Sampler, string? Load, string? Data, string? Models, string Name, int Steps, int Batch, int SeqLen, float Lr, int Port, bool Bf16,
-    string? Input, string? Output, string Format, string? Memory);
+    string? Input, string? Output, string Format, string? Memory, string Suite, int Repeats, ulong Seed);

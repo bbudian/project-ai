@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\ProjectAI.Training\ProjectAI.Training.csproj" />
+  </ItemGroup>
+</Project>

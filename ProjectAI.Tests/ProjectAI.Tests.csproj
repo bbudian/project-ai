@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <IsPackable>false</IsPackable>
@@ -18,5 +18,6 @@
     <ProjectReference Include="..\ProjectAI.Formats\ProjectAI.Formats.csproj" />
     <ProjectReference Include="..\ProjectAI.Training\ProjectAI.Training.csproj" />
     <ProjectReference Include="..\ProjectAI.Memory\ProjectAI.Memory.csproj" />
+    <ProjectReference Include="..\ProjectAI.Bench\ProjectAI.Bench.csproj" />
   </ItemGroup>
 </Project>

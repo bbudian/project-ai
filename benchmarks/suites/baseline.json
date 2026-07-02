@@ -1,0 +1,27 @@
+{
+  "id": "baseline",
+  "label": "Baseline — mixed knowledge, instruction, format, and throughput probes",
+  "evalCorpusFile": "../corpus/eval.txt",
+  "cases": [
+    { "id": "capital-fr", "prompt": "What is the capital of France? Answer in one word.", "mustInclude": ["Paris"], "maxTokens": 24 },
+    { "id": "arith-add", "prompt": "What is 17 + 25? Answer with just the number.", "mustInclude": ["42"], "maxTokens": 16 },
+    { "id": "arith-mul", "prompt": "What is 9 times 8? Answer with just the number.", "mustInclude": ["72"], "maxTokens": 16 },
+    { "id": "count-words", "prompt": "How many words are in this sentence: \"The quick brown fox jumps\"? Answer with just the number.", "mustInclude": ["5"], "maxTokens": 16 },
+    { "id": "opposite", "prompt": "What is the opposite of 'hot'? One word.", "mustInclude": ["cold"], "maxTokens": 12 },
+    { "id": "complete-proverb", "prompt": "Complete the proverb: The early bird catches the", "mustInclude": ["worm"], "maxTokens": 12 },
+    { "id": "capital-jp", "prompt": "Name the capital city of Japan.", "mustInclude": ["Tokyo"], "maxTokens": 16 },
+    { "id": "days-week", "prompt": "How many days are in a week? Answer with just the number.", "mustInclude": ["7"], "maxTokens": 12 },
+    { "id": "color-mix", "prompt": "What color do you get when you mix blue and yellow?", "mustInclude": ["green"], "maxTokens": 16 },
+    { "id": "planet", "prompt": "Which planet is known as the Red Planet?", "mustInclude": ["Mars"], "maxTokens": 16 },
+    { "id": "h2o", "prompt": "What is the chemical formula for water?", "mustInclude": ["H2O"], "maxTokens": 16 },
+    { "id": "list-3-fruits", "prompt": "List three fruits, one per line.", "maxTokens": 32 },
+    { "id": "json-object", "prompt": "Output a JSON object with a single key \"name\" whose value is \"test\". Output only the JSON.", "reference": "jsonValid", "maxTokens": 48 },
+    { "id": "rhyme", "prompt": "Give one word that rhymes with 'cat'.", "reference": "regex:(?i)\\b(bat|hat|mat|rat|sat|flat|that|pat|fat|vat)\\b", "maxTokens": 12 },
+    { "id": "translate-es", "prompt": "Translate 'hello' to Spanish. One word.", "mustInclude": ["hola"], "maxTokens": 12 },
+    { "id": "explain-loop", "prompt": "In one sentence, what does a for-loop do in programming?", "mustInclude": ["repeat"], "maxTokens": 48 },
+    { "id": "summarize", "prompt": "Summarize in one sentence: The cat sat on the mat all day because it was raining outside and the cat disliked getting wet.", "maxTokens": 48 },
+    { "id": "antonym-up", "prompt": "The opposite of up is", "mustInclude": ["down"], "maxTokens": 8 },
+    { "id": "throughput-short", "prompt": "Write two sentences about the ocean.", "maxTokens": 64 },
+    { "id": "throughput-long", "prompt": "Write a short story about a robot learning to garden.", "maxTokens": 192 }
+  ]
+}
