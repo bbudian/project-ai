@@ -15,8 +15,14 @@ public interface IApiClient
     event Action<TrainStatus> TrainStatusReceived;
 }
 
-/// <summary>One generation request: the prompt, the chosen model and compute backend (empty = server default), decoding settings, and whether to ground the answer in a live web search (RAG). Carried over the chat WebSocket (the old REST /generate result type was retired in favor of streaming).</summary>
-public sealed record GenerateRequest(string Prompt, string Model, string Backend, bool Sample, float Temperature, int TopK, float TopP, int MaxTokens, bool Research);
+/// <summary>One generation request: the prompt, the chosen model and compute backend (empty = server default), decoding settings, whether to ground the answer in a live web search (RAG), and whether to attach the server-side memory store (session-scoped — honored on the chat start frame). Carried over the chat WebSocket (the old REST /generate result type was retired in favor of streaming).</summary>
+public sealed record GenerateRequest(string Prompt, string Model, string Backend, bool Sample, float Temperature, int TopK, float TopP, int MaxTokens, bool Research, bool Memory, ulong Seed);
+
+/// <summary>The server's "ready" frame after a chat session starts: what it actually loaded, whether the model is instruct-tuned (ChatML detected), and the context window size.</summary>
+public sealed record SessionInfo(string Model, string Backend, bool Instruct, int ContextLimit);
+
+/// <summary>The server's "done" frame at the end of a turn: stop reason plus token/timing/context accounting. The short form (e.g. a research turn canceled mid-search) carries only <see cref="Stop"/> — numeric fields default to 0.</summary>
+public sealed record TurnStats(string Stop, int PromptTokens, int GeneratedTokens, float Seconds, int Position, int ContextLimit);
 
 /// <summary>A web source the model was grounded in (web-research mode): a title and its URL, shown as a citation under the reply.</summary>
 public sealed record SourceLink(string Title, string Url);

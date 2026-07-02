@@ -9,12 +9,12 @@ using Godot;
 // transport-agnostic. One persistent connection keeps the server's KV cache warm across turns (Phase 1 of live chat).
 public partial class ChatSocket : Node
 {
-    public event Action SessionReady;          // server accepted the session (start handled)
-    public event Action<string> Token;         // a streamed text delta
-    public event Action<string> Done;          // a turn finished (arg = stop reason)
-    public event Action<SourceLink[]> Sources; // web-research sources for the turn (arrives before the tokens)
-    public event Action<string> ChatError;     // server-reported or transport error
-    public event Action Closed;                // the connection dropped/closed
+    public event Action<SessionInfo> SessionReady; // server accepted the session (model/backend/instruct/context)
+    public event Action<string> Token;             // a streamed text delta
+    public event Action<TurnStats> Done;           // a turn finished (stop reason + token/timing/context accounting)
+    public event Action<SourceLink[]> Sources;     // web-research sources for the turn (arrives before the tokens)
+    public event Action<string> ChatError;         // server-reported or transport error
+    public event Action Closed;                    // the connection dropped/closed
 
     private readonly WebSocketPeer _peer = new();
     private readonly Queue<string> _outbox = new();
@@ -35,11 +35,21 @@ public partial class ChatSocket : Node
         if (err != Error.Ok) { _connecting = false; ChatError?.Invoke($"Could not open WebSocket to {ws} ({err})."); }
     }
 
-    /// <summary>Starts (or resets) the session for a model + backend. Resets the server's warm cache.</summary>
-    public void SendStart(string model, string backend) => Enqueue(new Godot.Collections.Dictionary
+    /// <summary>
+    /// Starts (or resets) the session for a model + backend, optionally attaching the server-side memory store.
+    /// Memory is session-scoped (the server honors it only on this frame, baking the bridge into the warm cache),
+    /// so toggling it mid-conversation requires a session restart. The store id is omitted — the server defaults it
+    /// to the model name (docs/CLIENT_DESIGN.md §4.4) — and the user is the fixed single-local-user "default".
+    /// </summary>
+    public void SendStart(string model, string backend, bool memory)
     {
-        { "type", "start" }, { "model", model ?? "" }, { "backend", backend ?? "" },
-    });
+        var d = new Godot.Collections.Dictionary
+        {
+            { "type", "start" }, { "model", model ?? "" }, { "backend", backend ?? "" },
+        };
+        if (memory) { d["memory"] = true; d["user"] = "default"; }
+        Enqueue(d);
+    }
 
     /// <summary>Sends a user message; the assistant reply streams back as Token events ending in Done.</summary>
     public void SendMessage(GenerateRequest r)
@@ -48,7 +58,7 @@ public partial class ChatSocket : Node
         {
             { "type", "message" }, { "text", r.Prompt }, { "maxTokens", r.MaxTokens }, { "sample", r.Sample }, { "research", r.Research },
         };
-        if (r.Sample) { d["temperature"] = r.Temperature; d["topK"] = r.TopK; d["topP"] = r.TopP; d["seed"] = 0; }
+        if (r.Sample) { d["temperature"] = r.Temperature; d["topK"] = r.TopK; d["topP"] = r.TopP; d["seed"] = r.Seed; }
         Enqueue(d);
     }
 
@@ -97,10 +107,18 @@ public partial class ChatSocket : Node
         var d = json.Data.AsGodotDictionary();
         switch (d.Str("type"))
         {
-            case "ready": SessionReady?.Invoke(); break;
+            case "ready":
+                SessionReady?.Invoke(new SessionInfo(
+                    d.Str("model"), d.Str("backend"), d.Bool("instruct"), d.Int("contextLimit")));
+                break;
             case "token": Token?.Invoke(d.Str("text")); break;
             case "sources": Sources?.Invoke(ParseSources(d)); break;
-            case "done": Done?.Invoke(d.Str("stop")); break;
+            case "done":
+                // The short form (research canceled mid-search) carries only stop — the numeric fields default to 0.
+                Done?.Invoke(new TurnStats(
+                    d.Str("stop"), d.Int("promptTokens"), d.Int("generatedTokens"),
+                    d.Float("seconds"), d.Int("position"), d.Int("contextLimit")));
+                break;
             case "error": ChatError?.Invoke(d.Str("error", "chat error")); break;
         }
     }

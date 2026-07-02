@@ -12,9 +12,12 @@ public partial class ChatView : HBoxContainer, IView
     private Transcript _transcript;
     private Composer _composer;
     private Label _title;
+    private Label _meter;      // right side of the header: context usage + last-turn stats
+    private Control _instruct; // "instruct" badge, shown when the server detects a chat-templated model
     private ChatSocket _chat;
     private TurnCard _activeTurn;
     private string _sessionModel = "", _sessionBackend = "";
+    private bool _sessionMemory;
     private bool _chatBusy;
     private bool _resetSession;
 
@@ -39,7 +42,18 @@ public partial class ChatView : HBoxContainer, IView
 
         var header = new PanelContainer();
         Palette.StylePanel(header, Palette.AppBg, pad: 14);
-        header.AddChild(_title = Palette.Heading("New chat", Palette.Type.H3));
+        var headerRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        headerRow.AddThemeConstantOverride("separation", Palette.Space.Sm);
+        _title = Palette.Heading("New chat", Palette.Type.H3);
+        _title.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        headerRow.AddChild(_title);
+        _instruct = Palette.Badge("instruct", Palette.Tone.Accent);
+        _instruct.Visible = false;
+        _instruct.TooltipText = "The server detected a chat-templated (instruct) model for this session.";
+        headerRow.AddChild(_instruct);
+        _meter = Palette.Heading("", Palette.Type.Caption, Palette.Muted);
+        headerRow.AddChild(_meter);
+        header.AddChild(headerRow);
         column.AddChild(header);
 
         column.AddChild(Palette.Pad(_transcript = new Transcript(), left: 24, right: 24, top: 8, bottom: 8, expand: true));
@@ -50,6 +64,7 @@ public partial class ChatView : HBoxContainer, IView
 
         _chat.Token += delta => { _activeTurn?.Append(delta); _transcript.ScrollToBottom(); };
         _chat.Sources += sources => { _activeTurn?.SetSources(sources); _transcript.ScrollToBottom(); };
+        _chat.SessionReady += OnSessionReady;
         _chat.Done += OnChatDone;
         _chat.ChatError += OnChatError;
         _chat.Closed += OnChatClosed;
@@ -100,6 +115,8 @@ public partial class ChatView : HBoxContainer, IView
             p.TopP = s.TopP;
             p.MaxTokens = s.MaxTokens;
             p.Research = s.Research;
+            p.Memory = s.Memory;
+            p.Seed = s.Seed;
         });
     }
 
@@ -114,13 +131,16 @@ public partial class ChatView : HBoxContainer, IView
         _state.SetSelection(request.Model, request.Backend);
 
         // One persistent /chat connection keeps the server's KV cache warm across turns. (Re)start the session when
-        // first connecting, when the model/backend changed, or after "New chat" cleared the conversation.
+        // first connecting, when the model/backend/memory choice changed, or after "New chat" cleared the
+        // conversation. Memory rides the start frame only (baked into the warm cache), hence the restart on toggle.
         if (!_chat.IsActive) { _chat.Connect(_state.ServerUrl); _resetSession = true; }
-        if (_resetSession || request.Model != _sessionModel || request.Backend != _sessionBackend)
+        if (_resetSession || request.Model != _sessionModel || request.Backend != _sessionBackend
+            || request.Memory != _sessionMemory)
         {
-            _chat.SendStart(request.Model, request.Backend);
+            _chat.SendStart(request.Model, request.Backend, request.Memory);
             _sessionModel = request.Model;
             _sessionBackend = request.Backend;
+            _sessionMemory = request.Memory;
             _resetSession = false;
         }
         _chat.SendMessage(request);
@@ -133,13 +153,22 @@ public partial class ChatView : HBoxContainer, IView
         if (_chatBusy) _chat.Cancel();
     }
 
-    private void OnChatDone(string stop)
+    private void OnSessionReady(SessionInfo info)
     {
-        _activeTurn?.Complete(stop);
+        _instruct.Visible = info.Instruct;
+        if (info.ContextLimit > 0) _meter.Text = $"ctx {info.ContextLimit:N0}";
+    }
+
+    private void OnChatDone(TurnStats stats)
+    {
+        _activeTurn?.Complete(stats.Stop);
         _transcript.ScrollToBottom();
         _activeTurn = null;
         _chatBusy = false;
         _composer.SetBusy(false);
+        // The short done form (research canceled mid-search) has no accounting — keep the previous meter then.
+        if (stats.ContextLimit > 0)
+            _meter.Text = $"{stats.Position:N0} / {stats.ContextLimit:N0} ctx   ·   {stats.GeneratedTokens} tok in {stats.Seconds:0.0}s";
     }
 
     private void OnChatError(string error)
@@ -167,6 +196,7 @@ public partial class ChatView : HBoxContainer, IView
     {
         _transcript.Clear();
         _title.Text = "New chat";
+        _meter.Text = "";
         _resetSession = true; // next message starts a fresh server session (drops the warm cache)
     }
 }

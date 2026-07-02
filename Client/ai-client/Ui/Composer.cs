@@ -20,8 +20,8 @@ public partial class Composer : PanelContainer
     private PopupPanel _settingsPopup;
     private OptionButton _model;
     private BackendPicker _backend;
-    private CheckButton _sample, _capLength, _research;
-    private SpinBox _temperature, _topK, _topP, _maxTokens, _fontSize;
+    private CheckButton _sample, _capLength, _research, _memory;
+    private SpinBox _temperature, _topK, _topP, _maxTokens, _fontSize, _seed;
 
     public override void _Ready()
     {
@@ -94,7 +94,8 @@ public partial class Composer : PanelContainer
         _temperature = Param(col, "Temperature", 0, 2, 0.05, 0.8);
         _topK = Param(col, "Top-K", 0, 200, 1, 40);
         _topP = Param(col, "Top-P", 0.05, 1, 0.05, 0.9);
-        foreach (var spin in new[] { _temperature, _topK, _topP })
+        _seed = Param(col, "Seed", 0, uint.MaxValue, 1, 0);
+        foreach (var spin in new[] { _temperature, _topK, _topP, _seed })
             spin.ValueChanged += _ => SettingsChanged?.Invoke();
 
         col.AddChild(new HSeparator());
@@ -118,6 +119,15 @@ public partial class Composer : PanelContainer
         col.AddChild(_research);
 
         col.AddChild(new HSeparator());
+        col.AddChild(Palette.Heading("Memory", 12, Palette.Muted));
+        // When on, the chat session attaches this model's server-side memory store: pinned facts are baked into the
+        // warm cache at session start, and each message recalls relevant memories. Toggling it restarts the session.
+        _memory = new CheckButton { Text = "🧠  Use long-term memory for this conversation" };
+        _memory.AddThemeColorOverride("font_color", Palette.Text);
+        _memory.Toggled += _ => SettingsChanged?.Invoke();
+        col.AddChild(_memory);
+
+        col.AddChild(new HSeparator());
         col.AddChild(Palette.Heading("Appearance", 12, Palette.Muted));
         _fontSize = Param(col, "Text size", 11, 28, 1, Palette.DefaultFontSize); // resizes the conversation text live
         _fontSize.ValueChanged += v => FontSizeChanged?.Invoke((int)v);
@@ -135,10 +145,12 @@ public partial class Composer : PanelContainer
         _temperature.Value = p.Temperature;
         _topK.Value = p.TopK;
         _topP.Value = p.TopP;
+        _seed.Value = p.Seed;
         _capLength.SetPressedNoSignal(p.MaxTokens > 0);
         OnCapToggled(p.MaxTokens > 0);
         if (p.MaxTokens > 0) _maxTokens.Value = p.MaxTokens;
         _research.SetPressedNoSignal(p.Research);
+        _memory.SetPressedNoSignal(p.Memory);
         _fontSize.Value = p.FontSize;
     }
 
@@ -215,6 +227,7 @@ public partial class Composer : PanelContainer
         _temperature.Editable = on;
         _topK.Editable = on;
         _topP.Editable = on;
+        if (_seed != null) _seed.Editable = on; // built after the toggle's first programmatic fire
     }
 
     private void OnCapToggled(bool on) => _maxTokens.Editable = on; // off → dynamic length (Submit sends maxTokens 0)
@@ -245,7 +258,9 @@ public partial class Composer : PanelContainer
         (int)_topK.Value,
         (float)_topP.Value,
         _capLength.ButtonPressed ? (int)_maxTokens.Value : 0, // 0 = dynamic (until the model stops / context fills)
-        _research.ButtonPressed);
+        _research.ButtonPressed,
+        _memory.ButtonPressed,
+        (ulong)_seed.Value);
 
     // A labelled spinbox row for the vertical popup layout: caption on the left, control on the right.
     private static SpinBox Param(VBoxContainer col, string label, double min, double max, double step, double value)
