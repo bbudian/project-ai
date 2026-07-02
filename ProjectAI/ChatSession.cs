@@ -1,4 +1,5 @@
 using ProjectAI.Core;
+using ProjectAI.Memory;
 using ProjectAI.Models;
 using ProjectAI.Tokenizers;
 
@@ -15,6 +16,7 @@ internal sealed class ChatSession
     private readonly ITokenizer _tok;
     private readonly ModelConfig _config;
     private readonly KvCache _cache;
+    private readonly IMemoryStore _memory;
     private readonly int _imEnd;
     private int _position; // tokens currently held in the cache
 
@@ -24,12 +26,13 @@ internal sealed class ChatSession
     public int ContextLimit => _config.MaxSequenceLength;
     public int Position => _position;
 
-    public ChatSession(IComputeBackend be, LoadedModel loaded, string backendId)
+    public ChatSession(IComputeBackend be, LoadedModel loaded, string backendId, IMemoryStore memory)
     {
         _be = be;
         _model = loaded.Model;
         _tok = loaded.Tokenizer;
         _config = loaded.Config;
+        _memory = memory;
         ModelName = loaded.Name;
         BackendId = backendId;
         _cache = new KvCache(be, _config, maxBatch: 1, maxSequenceLength: _config.MaxSequenceLength);
@@ -37,6 +40,19 @@ internal sealed class ChatSession
         int imStart = SingleToken("<|im_start|>");
         _imEnd = SingleToken("<|im_end|>");
         Instruct = imStart >= 0 && _imEnd >= 0;
+
+        // Ingest the always-pinned memory bridge ONCE at session start so it occupies the earliest (warm) cache
+        // positions and is never recomputed on later turns (the KV cache has no prefix-pinning — this is how we get a
+        // stable warm prefix). Per-turn recall is injected in Turn(). Bounded so it can't fill the context by itself.
+        if (_memory.IsConfigured && _position < _config.MaxSequenceLength / 2)
+        {
+            string bridge = _memory.RenderBridge(MemoryPolicy.BridgeCards, MemoryPolicy.BridgeBudget);
+            if (bridge.Length > 0)
+            {
+                string framed = Instruct ? $"<|im_start|>system\n{bridge}<|im_end|>\n" : bridge + "\n";
+                using (GradMode.NoGrad()) Forward(_tok.Encode(framed));
+            }
+        }
     }
 
     public sealed record TurnResult(int PromptTokens, int GeneratedTokens, string StopReason);
@@ -49,6 +65,13 @@ internal sealed class ChatSession
     /// </summary>
     public TurnResult Turn(string userText, ISampler sampler, int maxTokens, CancellationToken cancel, Action<string> onDelta)
     {
+        // Stage-0 preemptive recall: prepend the top trusted memories matched to this message (reference data, folded
+        // into the user turn). The bridge was already ingested once at session start.
+        if (_memory.IsConfigured)
+        {
+            string recall = _memory.RenderRecall(userText, MemoryPolicy.RecallHits, MemoryPolicy.RecallBudget);
+            if (recall.Length > 0) userText = recall + userText;
+        }
         var promptIds = BuildTurnPrompt(userText);
         if (_position + promptIds.Length >= _config.MaxSequenceLength)
             return new TurnResult(promptIds.Length, 0, "context_full");

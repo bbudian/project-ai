@@ -1,0 +1,204 @@
+/* ============================================================================
+   base.css — resets, layout utilities, and the reusable component CLASSES.
+   Uses ONLY var(--pa-*). No color / spacing / radius literals live here.
+   Component classes: .pa-btn(.pa-btn-primary/.pa-btn-ghost), .pa-chip, .pa-badge
+   (+ tone modifiers), .pa-card, .pa-input, .pa-select, .pa-toggle, .pa-metric,
+   .pa-table, .pa-field, .pa-empty.
+   ========================================================================== */
+
+/* --- Reset --------------------------------------------------------------- */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--pa-font);
+  font-size: var(--pa-fs-md);
+  line-height: var(--pa-lh);
+  color: var(--pa-text);
+  background: var(--pa-bg);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, h4, p, figure { margin: 0; }
+button { font-family: inherit; font-size: inherit; cursor: pointer; }
+input, select, textarea { font-family: inherit; font-size: inherit; }
+a { color: var(--pa-accent); text-decoration: none; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--pa-border); border-radius: var(--pa-radius); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* --- Layout utilities ---------------------------------------------------- */
+.pa-row  { display: flex; flex-direction: row; align-items: center; gap: var(--pa-sp-2); }
+.pa-col  { display: flex; flex-direction: column; gap: var(--pa-sp-2); }
+.pa-wrap { flex-wrap: wrap; }
+.pa-grow { flex: 1 1 auto; min-width: 0; }
+.pa-spacer { flex: 1 1 auto; }
+.pa-gap-3 { gap: var(--pa-sp-3); }
+.pa-gap-4 { gap: var(--pa-sp-4); }
+.pa-mt-3 { margin-top: var(--pa-sp-3); }
+.pa-mt-4 { margin-top: var(--pa-sp-4); }
+.pa-muted { color: var(--pa-muted); }
+.pa-mono { font-family: var(--pa-mono); }
+.pa-sm { font-size: var(--pa-fs-sm); }
+.pa-xs { font-size: var(--pa-fs-xs); }
+.pa-h1 { font-size: var(--pa-fs-2xl); font-weight: 650; }
+.pa-h2 { font-size: var(--pa-fs-xl);  font-weight: 600; }
+.pa-h3 { font-size: var(--pa-fs-lg);  font-weight: 600; }
+.pa-scroll { overflow: auto; }
+.pa-hidden { display: none !important; }
+
+/* Responsive grid used by views — collapses to 1 col on mobile via shell.css */
+.pa-grid { display: grid; gap: var(--pa-sp-4); }
+.pa-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pa-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.pa-grid-auto { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+
+/* --- Buttons ------------------------------------------------------------- */
+.pa-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: var(--pa-sp-2);
+  padding: var(--pa-sp-2) var(--pa-sp-4);
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius);
+  background: var(--pa-panel);
+  color: var(--pa-text);
+  white-space: nowrap;
+  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+.pa-btn:hover { background: var(--pa-hover); }
+.pa-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.pa-btn .ti { font-size: 1.05em; }
+
+.pa-btn-primary {
+  background: var(--pa-accent);
+  border-color: var(--pa-accent);
+  color: var(--pa-on-accent);
+}
+.pa-btn-primary:hover { background: var(--pa-accent); filter: brightness(1.08); }
+
+.pa-btn-ghost { background: transparent; border-color: transparent; }
+.pa-btn-ghost:hover { background: var(--pa-hover); }
+
+.pa-btn-sm { padding: var(--pa-sp-1) var(--pa-sp-3); font-size: var(--pa-fs-sm); }
+
+/* --- Chip (toggleable pill) ---------------------------------------------- */
+.pa-chip {
+  display: inline-flex; align-items: center; gap: var(--pa-sp-1);
+  padding: var(--pa-sp-1) var(--pa-sp-3);
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius-pill);
+  background: var(--pa-panel);
+  color: var(--pa-muted);
+  font-size: var(--pa-fs-sm);
+  user-select: none;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.pa-chip:hover { background: var(--pa-hover); color: var(--pa-text); }
+.pa-chip.is-active {
+  background: var(--pa-accent-soft);
+  border-color: var(--pa-accent-line);
+  color: var(--pa-text);
+}
+
+/* --- Badge + tone modifiers ---------------------------------------------- */
+.pa-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px var(--pa-sp-2);
+  border-radius: var(--pa-radius-pill);
+  font-size: var(--pa-fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--pa-border);
+  background: var(--pa-panel);
+  color: var(--pa-muted);
+}
+.pa-badge-neutral { }
+.pa-badge-accent { background: var(--pa-accent-soft); border-color: var(--pa-accent-line); color: var(--pa-text); }
+.pa-badge-good   { background: var(--pa-good-soft); border-color: var(--pa-good); color: var(--pa-good); }
+.pa-badge-bad    { background: var(--pa-bad-soft);  border-color: var(--pa-bad);  color: var(--pa-bad); }
+/* Memory tier tones */
+.pa-badge-tier-core      { background: var(--pa-accent-soft); border-color: var(--pa-accent-line); color: var(--pa-text); }
+.pa-badge-tier-long      { background: var(--pa-good-soft); border-color: var(--pa-good); color: var(--pa-good); }
+.pa-badge-tier-inherited { background: var(--pa-panel); border-color: var(--pa-border); color: var(--pa-muted); }
+/* Trust tones */
+.pa-badge-trust-trusted   { background: var(--pa-good-soft); border-color: var(--pa-good); color: var(--pa-good); }
+.pa-badge-trust-untrusted { background: var(--pa-bad-soft); border-color: var(--pa-bad); color: var(--pa-bad); }
+
+/* --- Card ---------------------------------------------------------------- */
+.pa-card {
+  background: var(--pa-panel);
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius-lg);
+  padding: var(--pa-sp-4);
+}
+
+/* --- Inputs & selects ---------------------------------------------------- */
+.pa-input, .pa-select {
+  width: 100%;
+  padding: var(--pa-sp-2) var(--pa-sp-3);
+  background: var(--pa-input);
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius);
+  color: var(--pa-text);
+  outline: none;
+}
+.pa-input::placeholder { color: var(--pa-muted); }
+.pa-input:focus, .pa-select:focus { border-color: var(--pa-accent-line); }
+textarea.pa-input { resize: vertical; min-height: 60px; line-height: var(--pa-lh); }
+
+/* --- Toggle (segmented switch) ------------------------------------------- */
+.pa-toggle {
+  display: inline-flex; align-items: center;
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius-pill);
+  background: var(--pa-panel);
+  padding: 2px;
+  gap: 2px;
+}
+.pa-toggle button {
+  border: none; background: transparent; color: var(--pa-muted);
+  padding: 4px var(--pa-sp-3);
+  border-radius: var(--pa-radius-pill);
+  font-size: var(--pa-fs-sm);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.pa-toggle button.is-on { background: var(--pa-accent); color: var(--pa-on-accent); }
+
+/* --- Metric card --------------------------------------------------------- */
+.pa-metric {
+  background: var(--pa-panel);
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius-lg);
+  padding: var(--pa-sp-4);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.pa-metric-label { font-size: var(--pa-fs-sm); color: var(--pa-muted); }
+.pa-metric-value { font-size: var(--pa-fs-xl); font-weight: 650; }
+.pa-metric-sub   { font-size: var(--pa-fs-xs); color: var(--pa-muted); }
+
+/* --- Table --------------------------------------------------------------- */
+.pa-table { width: 100%; border-collapse: collapse; font-size: var(--pa-fs-sm); }
+.pa-table th, .pa-table td {
+  text-align: left;
+  padding: var(--pa-sp-2) var(--pa-sp-3);
+  border-bottom: 1px solid var(--pa-border);
+}
+.pa-table th { color: var(--pa-muted); font-weight: 600; }
+.pa-table tr:last-child td { border-bottom: none; }
+.pa-table tbody tr:hover { background: var(--pa-hover); }
+
+/* --- Field (label + control + hint) -------------------------------------- */
+.pa-field { display: flex; flex-direction: column; gap: var(--pa-sp-1); }
+.pa-field-label { font-size: var(--pa-fs-sm); color: var(--pa-muted); font-weight: 600; }
+.pa-field-hint  { font-size: var(--pa-fs-xs); color: var(--pa-muted); }
+
+/* --- Empty state --------------------------------------------------------- */
+.pa-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--pa-sp-3);
+  text-align: center;
+  padding: var(--pa-sp-6);
+  color: var(--pa-muted);
+}
+.pa-empty .ti { font-size: 40px; color: var(--pa-border); }
+.pa-empty-title { font-size: var(--pa-fs-lg); color: var(--pa-text); font-weight: 600; }
+.pa-empty-body { max-width: 360px; }

@@ -3,6 +3,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using ProjectAI.Core;
+using ProjectAI.Memory;
 using ProjectAI.Models;
 using ProjectAI.Research;
 using ProjectAI.Training;
@@ -18,7 +19,7 @@ internal static class Server
 {
     private sealed record GenerateRequest(
         string? Prompt, string? Model, string? Backend, int? MaxTokens, float? Temperature, int? TopK, float? TopP, ulong? Seed,
-        bool? Research, int? ResearchResults);
+        bool? Research, int? ResearchResults, bool? Memory, string? User, string? Store);
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
@@ -26,10 +27,14 @@ internal static class Server
     // seam (reads TAVILY_API_KEY); swap the provider here to change search backends.
     private static readonly WebResearcher Researcher = new(new TavilySearchProvider());
 
-    public static void Run(IComputeBackend defaultBackend, string defaultBackendId, string modelsDirectory, string defaultModel, int port)
+    // Per-user long-term memory (multi-client): stores are resolved lazily per (user, store) under the memory root.
+    private static MemoryStoreRegistry? _memory;
+
+    public static void Run(IComputeBackend defaultBackend, string defaultBackendId, string modelsDirectory, string defaultModel, int port, string memoryRoot)
     {
         using var compute = new ComputeRegistry(modelsDirectory, defaultBackend, defaultBackendId);
         var training = new TrainingService();
+        _memory = new MemoryStoreRegistry(memoryRoot);
         var models = compute.ListModels();
         if (models.Count == 0)
         {
@@ -212,6 +217,24 @@ internal static class Server
             catch (Exception ex) { WriteJson(res, 502, new { error = $"web research failed: {ex.Message}" }); return; }
         }
 
+        // Optional long-term memory (Stage-0 preemptive recall): prepend the always-pinned bridge + the top trusted
+        // memories matched to this prompt, BEFORE the lock (pure file/index work, like web research). Per-user store.
+        if (gr.Memory == true && _memory is not null)
+        {
+            string modelForStore = string.IsNullOrEmpty(gr.Model) ? defaultModel : gr.Model;
+            var store = _memory.Resolve(gr.User, gr.Store ?? modelForStore);
+            if (store.IsConfigured)
+            {
+                string bridge = store.RenderBridge(MemoryPolicy.BridgeCards, MemoryPolicy.BridgeBudget);
+                string recall = store.RenderRecall(gr.Prompt, MemoryPolicy.RecallHits, MemoryPolicy.RecallBudget);
+                if (bridge.Length + recall.Length > 0)
+                {
+                    prompt = bridge + recall + prompt;
+                    Console.WriteLine($"  memory: store={store.StoreId} bridge={bridge.Length}c recall={recall.Length}c");
+                }
+            }
+        }
+
         // Everything below touches the model cache and runs the forward pass, so it is serialized: a second
         // /generate (e.g. from a reopened client while an abandoned one is still finishing) waits here instead of
         // corrupting shared state — while /health etc. stay responsive because they never take this lock.
@@ -372,7 +395,7 @@ internal static class Server
     private sealed record ChatIn(
         string? Type, string? Model, string? Backend, string? Text,
         bool? Sample, float? Temperature, int? TopK, float? TopP, int? MaxTokens, ulong? Seed,
-        bool? Research, int? ResearchResults);
+        bool? Research, int? ResearchResults, bool? Memory, string? User, string? Store);
 
     // Accepts a /chat WebSocket and runs a stateful streaming session (Phase 1 of live chat): a persistent warm KV
     // cache, each new user message ingested incrementally, and the assistant reply streamed token-by-token. The
@@ -523,7 +546,10 @@ internal static class Server
         var (backend, registry) = compute.Resolve(backendId);
         string modelName = string.IsNullOrEmpty(m.Model) ? defaultModel : m.Model;
         var loaded = registry.Get(modelName) ?? throw new InvalidOperationException($"unknown model '{modelName}'");
-        return new ChatSession(backend, loaded, backendId);
+        IMemoryStore memory = m.Memory == true && _memory is not null
+            ? _memory.Resolve(m.User, m.Store ?? modelName)
+            : NullMemoryStore.Instance;
+        return new ChatSession(backend, loaded, backendId, memory);
     }
 
     private static void Send(WebSocket socket, object payload)

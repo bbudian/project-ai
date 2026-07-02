@@ -65,7 +65,8 @@ switch (command)
             modelsDir = opts.Models ?? "checkpoints";
             defaultModel = "model";
         }
-        Server.Run(backend, backendId, modelsDir, defaultModel, opts.Port);
+        string memoryRoot = opts.Memory ?? "memory";
+        Server.Run(backend, backendId, modelsDir, defaultModel, opts.Port, memoryRoot);
         break;
     }
     case "convert":
@@ -90,9 +91,10 @@ switch (command)
         Console.WriteLine("                  Reload a saved checkpoint (architecture read from the file) and generate.");
         Console.WriteLine("  tokenize <text> [--load <checkpoint>] [--name M]");
         Console.WriteLine("                  Show how <text> splits into tokens (ids + pieces) for a model's tokenizer.");
-        Console.WriteLine("  serve [--models <dir>] [--load <checkpoint>] [--port N]");
+        Console.WriteLine("  serve [--models <dir>] [--load <checkpoint>] [--port N] [--memory <dir>]");
         Console.WriteLine("                  Serve an HTTP API (POST /generate, GET /health, GET /models) over a directory of");
         Console.WriteLine("                  trained .ckpt models (default ./checkpoints) so the UI client can pick a model.");
+        Console.WriteLine("                  --memory <dir> roots the per-user long-term memory stores (default ./memory).");
         Console.WriteLine("  convert <hf-model-dir> [--name M]");
         Console.WriteLine("                  Convert a HuggingFace Llama checkpoint (config.json + .safetensors) to a .ckpt.");
         Console.WriteLine("  convert-dataset --input <text-file> [--output <dir>] [--seqlen S] [--format text]");
@@ -150,7 +152,7 @@ static CliOptions ParseCliOptions(string[] rest)
     float topP = 1.0f;
     ulong seed = 0;
     bool sample = false;
-    string? load = null, data = null, models = null;
+    string? load = null, data = null, models = null, memory = null;
     string name = "model";
     int steps = 400, batch = 8, seqLen = 64, port = 8080;
     float lr = 3e-3f;
@@ -171,6 +173,7 @@ static CliOptions ParseCliOptions(string[] rest)
             case "--load": load = ParseStringFlag(rest, ref i, tok); break;
             case "--data": data = ParseStringFlag(rest, ref i, tok); break;
             case "--models": models = ParseStringFlag(rest, ref i, tok); break;
+            case "--memory": memory = ParseStringFlag(rest, ref i, tok); break;
             case "--name": name = ParseStringFlag(rest, ref i, tok); break;
             case "--steps": steps = ParseIntFlag(rest, ref i, tok); break;
             case "--batch": batch = ParseIntFlag(rest, ref i, tok); break;
@@ -206,7 +209,7 @@ static CliOptions ParseCliOptions(string[] rest)
     ISampler sampler = sample
         ? new TopKTopPSampler(new PcgRng(seed), temperature, topK, topP)
         : new GreedySampler();
-    return new CliOptions(prompt, sampler, load, data, models, name, steps, batch, seqLen, lr, port, bf16, input, output, format);
+    return new CliOptions(prompt, sampler, load, data, models, name, steps, batch, seqLen, lr, port, bf16, input, output, format, memory);
 
     static float ParseFloatFlag(string[] a, ref int i, string flag)
     {
@@ -605,4 +608,4 @@ static void RunStage0Demo(IComputeBackend be)
 // data file + hyperparameters (train --data), and the serve port.
 internal sealed record CliOptions(
     string Prompt, ISampler Sampler, string? Load, string? Data, string? Models, string Name, int Steps, int Batch, int SeqLen, float Lr, int Port, bool Bf16,
-    string? Input, string? Output, string Format);
+    string? Input, string? Output, string Format, string? Memory);

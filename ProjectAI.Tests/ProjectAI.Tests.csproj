@@ -17,5 +17,6 @@
     <ProjectReference Include="..\ProjectAI.Tokenizers\ProjectAI.Tokenizers.csproj" />
     <ProjectReference Include="..\ProjectAI.Formats\ProjectAI.Formats.csproj" />
     <ProjectReference Include="..\ProjectAI.Training\ProjectAI.Training.csproj" />
+    <ProjectReference Include="..\ProjectAI.Memory\ProjectAI.Memory.csproj" />
   </ItemGroup>
 </Project>

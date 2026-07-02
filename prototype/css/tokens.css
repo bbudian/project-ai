@@ -1,0 +1,85 @@
+/* ============================================================================
+   tokens.css — THE SINGLE SOURCE OF COLOR, SPACING, RADIUS, AND TYPE.
+   This is the ONLY file where color/spacing/radius/type literals may live.
+   Restyle the whole harness by editing this file alone. Everything else
+   references var(--pa-*). Palette mirrors Client/ai-client/Ui/Palette.cs exactly.
+   ========================================================================== */
+
+:root {
+  /* --- Surfaces & text (mirror Palette.cs) --- */
+  --pa-bg:        #1e1e1e;  /* AppBg      */
+  --pa-sidebar:   #161616;  /* SidebarBg  */
+  --pa-panel:     #252525;  /* PanelBg    */
+  --pa-input:     #2c2c2c;  /* InputBg    */
+  --pa-user:      #343434;  /* UserBubble */
+  --pa-hover:     #2a2a2a;  /* Hover      */
+  --pa-text:      #ededed;  /* Text       */
+  --pa-muted:     #9b9b9b;  /* Muted      */
+  --pa-accent:    #c96442;  /* Accent     */
+  --pa-on-accent: #ffffff;  /* OnAccent   */
+  --pa-good:      #82b682;  /* Good       */
+  --pa-bad:       #e0726e;  /* Bad        */
+  --pa-border:    #323232;  /* Border     */
+
+  /* Derived accent tints (kept here so no component computes color) */
+  --pa-accent-soft:  rgba(201, 100, 66, 0.16); /* accent-tinted active nav / chips */
+  --pa-accent-line:  rgba(201, 100, 66, 0.45);
+  --pa-good-soft:    rgba(130, 182, 130, 0.16);
+  --pa-bad-soft:     rgba(224, 114, 110, 0.16);
+
+  /* --- Spacing scale --- */
+  --pa-sp-1: 4px;
+  --pa-sp-2: 8px;
+  --pa-sp-3: 12px;
+  --pa-sp-4: 16px;
+  --pa-sp-5: 24px;
+  --pa-sp-6: 32px;
+
+  /* --- Radius --- */
+  --pa-radius:    8px;
+  --pa-radius-lg: 12px;
+  --pa-radius-pill: 999px;
+
+  /* --- Type scale --- */
+  --pa-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+             Arial, "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+  --pa-mono: "SF Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+  --pa-fs-xs:  11px;
+  --pa-fs-sm:  12px;
+  --pa-fs-md:  14px;   /* base body — matches Palette.DefaultFontSize */
+  --pa-fs-lg:  16px;
+  --pa-fs-xl:  20px;
+  --pa-fs-2xl: 26px;
+  --pa-lh: 1.5;
+
+  /* --- Layout constants --- */
+  --pa-rail-w:   236px;
+  --pa-phone-w:  390px;
+  --pa-shadow:   0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* ----------------------------------------------------------------------------
+   Light theme: remap surfaces + text; KEEP the accent identity.
+   Applied via <html data-theme="light">.
+   -------------------------------------------------------------------------- */
+:root[data-theme="light"] {
+  --pa-bg:        #ffffff;
+  --pa-sidebar:   #f3f3f1;
+  --pa-panel:     #f7f7f5;
+  --pa-input:     #ececea;
+  --pa-user:      #e7e7e4;
+  --pa-hover:     #ededeb;
+  --pa-text:      #1f1f1f;
+  --pa-muted:     #6b6b6b;
+  --pa-accent:    #c96442;  /* keep accent */
+  --pa-on-accent: #ffffff;
+  --pa-good:      #3f8f5b;
+  --pa-bad:       #c0403c;
+  --pa-border:    #dcdcd8;
+
+  --pa-accent-soft: rgba(201, 100, 66, 0.14);
+  --pa-accent-line: rgba(201, 100, 66, 0.40);
+  --pa-good-soft:   rgba(63, 143, 91, 0.14);
+  --pa-bad-soft:    rgba(192, 64, 60, 0.14);
+  --pa-shadow:      0 1px 3px rgba(0, 0, 0, 0.12);
+}

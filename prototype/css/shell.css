@@ -1,0 +1,215 @@
+/* ============================================================================
+   shell.css — the RESPONSIVE app shell (nav rail / bottom tabs / main column /
+   top bar) and the harness toolbar. Uses ONLY var(--pa-*).
+
+   Desktop (>640px): left labeled nav rail + main column.
+   Mobile (<=640px OR html.force-mobile): bottom tab bar + full-width main.
+   Device toggle: html.force-mobile constrains #app to a centered phone frame.
+   ========================================================================== */
+
+/* --- Harness toolbar (sits above #app, outside the shell) ---------------- */
+.pa-harness {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: var(--pa-sp-3);
+  padding: var(--pa-sp-2) var(--pa-sp-4);
+  background: var(--pa-sidebar);
+  border-bottom: 1px solid var(--pa-border);
+  font-size: var(--pa-fs-sm);
+}
+.pa-harness .pa-harness-tag {
+  font-weight: 700; letter-spacing: 0.04em; color: var(--pa-muted);
+  text-transform: uppercase; font-size: var(--pa-fs-xs);
+}
+.pa-harness .pa-harness-url { width: 220px; }
+.pa-harness .pa-harness-note {
+  color: var(--pa-muted); font-size: var(--pa-fs-xs); margin-left: auto;
+}
+
+/* --- App container -------------------------------------------------------- */
+/* The page is a flex column: the harness toolbar takes its natural height (it
+   wraps to several rows on mobile) and #app fills whatever remains. Robust to
+   the toolbar height instead of subtracting a magic constant. */
+body { height: 100vh; margin: 0; display: flex; flex-direction: column; }
+#app {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+/* --- The shell root ------------------------------------------------------- */
+.pa-shell { display: flex; flex: 1 1 auto; min-height: 0; width: 100%; }
+
+/* --- Nav rail (desktop) --------------------------------------------------- */
+.pa-rail {
+  width: var(--pa-rail-w);
+  flex: 0 0 var(--pa-rail-w);
+  background: var(--pa-sidebar);
+  border-right: 1px solid var(--pa-border);
+  display: flex; flex-direction: column;
+  padding: var(--pa-sp-4) var(--pa-sp-3);
+  gap: var(--pa-sp-1);
+}
+.pa-brand {
+  display: flex; align-items: center; gap: var(--pa-sp-2);
+  padding: var(--pa-sp-2) var(--pa-sp-2) var(--pa-sp-4);
+}
+.pa-brand-mark {
+  width: 26px; height: 26px; border-radius: var(--pa-radius);
+  background: var(--pa-accent);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--pa-on-accent); font-weight: 700; font-size: var(--pa-fs-md);
+}
+.pa-brand-name { font-weight: 650; font-size: var(--pa-fs-lg); }
+
+.pa-nav-item {
+  display: flex; align-items: center; gap: var(--pa-sp-3);
+  padding: var(--pa-sp-2) var(--pa-sp-3);
+  border-radius: var(--pa-radius);
+  color: var(--pa-muted);
+  background: transparent;
+  border: none; width: 100%; text-align: left;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.pa-nav-item .ti { font-size: 18px; width: 20px; text-align: center; }
+.pa-nav-item:hover { background: var(--pa-hover); color: var(--pa-text); }
+.pa-nav-item.is-active {
+  background: var(--pa-accent-soft);
+  color: var(--pa-text);
+}
+.pa-nav-item.is-active .ti { color: var(--pa-accent); }
+
+.pa-rail-foot {
+  margin-top: auto;
+  padding: var(--pa-sp-3) var(--pa-sp-3) 0;
+  border-top: 1px solid var(--pa-border);
+  font-size: var(--pa-fs-xs);
+  color: var(--pa-muted);
+  display: flex; align-items: center; gap: var(--pa-sp-2);
+}
+.pa-status-dot { width: 8px; height: 8px; border-radius: var(--pa-radius-pill); background: var(--pa-muted); flex: 0 0 auto; }
+.pa-status-dot.is-on  { background: var(--pa-good); }
+.pa-status-dot.is-off { background: var(--pa-bad); }
+
+/* --- Main column ---------------------------------------------------------- */
+.pa-main {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  background: var(--pa-bg);
+}
+.pa-topbar {
+  display: flex; align-items: center; gap: var(--pa-sp-3);
+  padding: var(--pa-sp-3) var(--pa-sp-5);
+  border-bottom: 1px solid var(--pa-border);
+  flex: 0 0 auto;
+  min-height: 52px;
+}
+.pa-topbar-title { font-size: var(--pa-fs-lg); font-weight: 600; }
+.pa-topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--pa-sp-2); }
+
+.pa-view {
+  flex: 1 1 auto; min-height: 0;
+  overflow: auto;
+  padding: var(--pa-sp-5);
+}
+
+/* --- Bottom tab bar (mobile only; hidden on desktop) ---------------------- */
+.pa-tabs { display: none; }
+.pa-tab {
+  flex: 1 1 0; display: flex; flex-direction: column; align-items: center;
+  gap: 2px; padding: var(--pa-sp-2) 0;
+  background: transparent; border: none;
+  color: var(--pa-muted); font-size: var(--pa-fs-xs);
+}
+.pa-tab .ti { font-size: 20px; }
+.pa-tab.is-active { color: var(--pa-accent); }
+
+/* ============================================================================
+   RESPONSIVE: real viewport <=640px OR the forced-mobile device preview.
+   We repeat the rules for a media query and for html.force-mobile so the
+   desktop "Mobile" device toggle previews the same layout.
+   ========================================================================== */
+@media (max-width: 640px) {
+  .pa-shell { flex-direction: column; }   /* stack main over the bottom tab bar */
+  .pa-rail { display: none; }
+  .pa-tabs {
+    display: flex;
+    background: var(--pa-sidebar);
+    border-top: 1px solid var(--pa-border);
+    flex: 0 0 auto;
+  }
+  .pa-topbar { padding: var(--pa-sp-3) var(--pa-sp-4); }
+  .pa-view { padding: var(--pa-sp-4); }
+  .pa-grid-2, .pa-grid-3, .pa-grid-auto { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Forced mobile (device toggle) — mirrors the media query and adds a phone frame. */
+html.force-mobile .pa-shell { flex-direction: column; }   /* stack main over the bottom tab bar */
+html.force-mobile .pa-rail { display: none; }
+html.force-mobile .pa-tabs {
+  display: flex;
+  background: var(--pa-sidebar);
+  border-top: 1px solid var(--pa-border);
+  flex: 0 0 auto;
+}
+html.force-mobile .pa-topbar { padding: var(--pa-sp-3) var(--pa-sp-4); }
+html.force-mobile .pa-view { padding: var(--pa-sp-4); }
+html.force-mobile .pa-grid-2,
+html.force-mobile .pa-grid-3,
+html.force-mobile .pa-grid-auto { grid-template-columns: minmax(0, 1fr); }
+
+/* Phone frame: center #app to a ~390px column with a rounded border so the
+   mobile layout previews as a phone on a wide desktop screen. */
+html.force-mobile #app {
+  max-width: var(--pa-phone-w);
+  margin: var(--pa-sp-4) auto;
+  height: calc(100vh - 45px - var(--pa-sp-6));
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius-lg);
+  box-shadow: var(--pa-shadow);
+  overflow: hidden;
+}
+
+/* ============================================================================
+   Settings view layout — a narrow section list + a flexible pane. Collapses to
+   a single stacked column on mobile (media query + forced-mobile), like the
+   .pa-grid* utilities. Colors come only from var(--pa-*).
+   ========================================================================== */
+.pa-settings-grid {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: var(--pa-sp-4);
+  align-items: start;
+}
+.pa-settings-list { padding: var(--pa-sp-2); }
+.pa-settings-pane { min-width: 0; display: flex; flex-direction: column; gap: var(--pa-sp-4); }
+
+.pa-section-item {
+  display: flex; align-items: center; gap: var(--pa-sp-3);
+  width: 100%; text-align: left;
+  padding: var(--pa-sp-2) var(--pa-sp-3);
+  border: none; background: transparent;
+  border-radius: var(--pa-radius);
+  color: var(--pa-muted);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.pa-section-item .ti { font-size: 18px; width: 20px; text-align: center; flex: 0 0 auto; }
+.pa-section-item:hover { background: var(--pa-hover); color: var(--pa-text); }
+.pa-section-item.is-active { background: var(--pa-accent-soft); color: var(--pa-text); }
+.pa-section-item.is-active .ti { color: var(--pa-accent); }
+.pa-section-name { font-weight: 600; color: var(--pa-text); }
+
+/* Masked secret display — never holds a real key, just dots. */
+.pa-key-mask {
+  padding: var(--pa-sp-1) var(--pa-sp-3);
+  background: var(--pa-input);
+  border: 1px solid var(--pa-border);
+  border-radius: var(--pa-radius);
+  color: var(--pa-muted);
+  letter-spacing: 0.06em;
+}
+
+@media (max-width: 640px) {
+  .pa-settings-grid { grid-template-columns: minmax(0, 1fr); }
+}
+html.force-mobile .pa-settings-grid { grid-template-columns: minmax(0, 1fr); }

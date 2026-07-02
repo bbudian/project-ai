@@ -12,3 +12,5 @@ riderModule.iml
 *.gguf
 *.ckpt
 .dotnet/
+hf-models/
+memory/          # per-user long-term memory stores (runtime data, not source)

@@ -27,6 +27,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProjectAI.Trainer", "Projec
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProjectAI.Research", "ProjectAI.Research\ProjectAI.Research.csproj", "{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ProjectAI.Memory", "ProjectAI.Memory\ProjectAI.Memory.csproj", "{DFFF6297-D73D-476C-83A9-4E6461EFC82D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -181,6 +183,18 @@ Global
 		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Release|x64.Build.0 = Release|Any CPU
 		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Release|x86.ActiveCfg = Release|Any CPU
 		{6276E7FE-FF0E-49F9-B83B-B8A5D42255FB}.Release|x86.Build.0 = Release|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Debug|x64.Build.0 = Debug|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Debug|x86.Build.0 = Debug|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Release|x64.ActiveCfg = Release|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Release|x64.Build.0 = Release|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Release|x86.ActiveCfg = Release|Any CPU
+		{DFFF6297-D73D-476C-83A9-4E6461EFC82D}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

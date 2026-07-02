@@ -14,6 +14,7 @@
     <ProjectReference Include="..\ProjectAI.Models\ProjectAI.Models.csproj" />
     <ProjectReference Include="..\ProjectAI.Training\ProjectAI.Training.csproj" />
     <ProjectReference Include="..\ProjectAI.Research\ProjectAI.Research.csproj" />
+    <ProjectReference Include="..\ProjectAI.Memory\ProjectAI.Memory.csproj" />
   </ItemGroup>
 
 </Project>

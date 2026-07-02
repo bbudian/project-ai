@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ProjectAI — Prototype Harness</title>
+
+  <!-- Tabler icons webfont (CDN). <i class="ti ti-name"></i> works when online;
+       degrades gracefully to nothing when offline. -->
+  <link rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.31.0/dist/tabler-icons.min.css"
+        crossorigin="anonymous" />
+
+  <!-- Theme tokens FIRST (single source of color), then base, then shell. -->
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/shell.css" />
+</head>
+<body>
+  <!-- ======================================================================
+       HARNESS TOOLBAR — lives OUTSIDE #app. Server URL + Connect, a Live/Mock
+       data-source toggle, a Dark/Light theme toggle, and a Desktop/Mobile
+       device toggle. app.js wires these up by id.
+       ==================================================================== -->
+  <div class="pa-harness">
+    <span class="pa-harness-tag">Harness</span>
+
+    <input id="pa-harness-url" class="pa-input pa-harness-url" type="text"
+           placeholder="http://localhost:8080" spellcheck="false" />
+    <button id="pa-harness-connect" class="pa-btn pa-btn-sm" type="button">
+      <i class="ti ti-plug"></i><span>Connect</span>
+    </button>
+
+    <!-- Live / Mock data source -->
+    <div id="pa-harness-source" class="pa-toggle" role="group" aria-label="Data source">
+      <button data-value="live" type="button">Live</button>
+      <button data-value="mock" type="button">Mock</button>
+    </div>
+
+    <!-- Dark / Light theme -->
+    <div id="pa-harness-theme" class="pa-toggle" role="group" aria-label="Theme">
+      <button data-value="dark" type="button">Dark</button>
+      <button data-value="light" type="button">Light</button>
+    </div>
+
+    <!-- Desktop / Mobile device preview -->
+    <div id="pa-harness-device" class="pa-toggle" role="group" aria-label="Device">
+      <button data-value="desktop" type="button">Desktop</button>
+      <button data-value="mobile" type="button">Mobile</button>
+    </div>
+
+    <span class="pa-harness-note">
+      Endpoints not yet on the server fall back to Mock automatically.
+    </span>
+  </div>
+
+  <!-- The single app mount point. app.js builds the shell into this. -->
+  <div id="app"></div>
+
+  <!-- ======================================================================
+       SCRIPTS — classic <script> tags, NO ES modules, loaded in dependency
+       order. Everything hangs off the single global PA.
+         config   -> PA + PA.config
+         ui       -> PA.ui (DOM helpers)
+         store    -> PA.store (reactive state)
+         api      -> PA.api (ONLY fetch/WebSocket)
+         mock     -> PA.mock + PA.data() seam
+         components -> PA.components
+         views/*  -> self-register via PA.registerView (added in a later phase)
+         app      -> PA.app.boot()
+       ==================================================================== -->
+  <script src="js/config.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/mock.js"></script>
+  <script src="js/components.js"></script>
+
+  <!-- Views self-register; they are created in a later phase. Missing files
+       just 404 harmlessly (app.js renders an empty state if none register). -->
+  <script src="js/views/chat.js"></script>
+  <script src="js/views/models.js"></script>
+  <script src="js/views/memory.js"></script>
+  <script src="js/views/benchmark.js"></script>
+  <script src="js/views/settings.js"></script>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
