@@ -34,6 +34,7 @@ internal static class Server
     {
         using var compute = new ComputeRegistry(modelsDirectory, defaultBackend, defaultBackendId);
         var training = new TrainingService();
+        var bench = new BenchmarkService();
         _memory = new MemoryStoreRegistry(memoryRoot);
         var models = compute.ListModels();
         if (models.Count == 0)
@@ -87,14 +88,22 @@ internal static class Server
             // that lock, so they always answer — which is what lets a reopened client reconnect immediately.
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                try { Handle(ctx, compute, training, defaultModel); }
+                try { Handle(ctx, compute, training, bench, modelsDirectory, defaultModel); }
                 catch { /* never let one request take down the server process */ }
             });
         }
         Console.WriteLine("Server stopped.");
     }
 
-    private static void Handle(HttpListenerContext ctx, ComputeRegistry compute, TrainingService training, string defaultModel)
+    // One reason string when the GPU is committed to a background job, else null. Both /generate and /chat (and the
+    // opposite job kind) gate on this: a small GPU cannot serve a chat turn and a train/bench step at once.
+    private static string? GpuBusy(TrainingService training, BenchmarkService bench) =>
+        training.IsTraining ? "a training job is in progress; try again when it finishes"
+        : bench.IsBenchmarking ? "a benchmark run is in progress; try again when it finishes"
+        : null;
+
+    private static void Handle(HttpListenerContext ctx, ComputeRegistry compute, TrainingService training,
+        BenchmarkService bench, string modelsDirectory, string defaultModel)
     {
         var req = ctx.Request;
         var res = ctx.Response;
@@ -109,7 +118,7 @@ internal static class Server
             string path = req.Url?.AbsolutePath ?? "/";
             if (req.HttpMethod == "OPTIONS") { res.StatusCode = 204; res.Close(); return; }
 
-            if (req.IsWebSocketRequest && path == "/chat") { RunChat(ctx, compute, defaultModel); return; }
+            if (req.IsWebSocketRequest && path == "/chat") { RunChat(ctx, compute, training, bench, defaultModel); return; }
 
             if (req.HttpMethod == "GET" && (path == "/health" || path == "/models"))
             {
@@ -136,6 +145,7 @@ internal static class Server
                     defaultBackend = compute.DefaultId,
                     sizes = ModelPresets.Names.Select(s => new { id = s, label = ModelPresets.Describe(s) }),
                     training = TrainStatus(training),
+                    bench = BenchStatus(bench),
                 });
                 return;
             }
@@ -156,13 +166,48 @@ internal static class Server
 
             if (req.HttpMethod == "POST" && path == "/train")
             {
+                // The GPU is a single resource: no training while a benchmark runs (and vice versa).
+                if (bench.IsBenchmarking) { WriteJson(res, 409, new { error = "a benchmark run is in progress; try again when it finishes" }); return; }
                 HandleTrain(req, res, compute, training, defaultModel: compute.DefaultId);
+                return;
+            }
+
+            // ---- benchmark (the accuracy instrument over HTTP; mirrors the /train background-job pattern) --------
+            if (req.HttpMethod == "GET" && path == "/benchmark/status")
+            {
+                WriteJson(res, 200, new { bench = BenchStatus(bench) });
+                return;
+            }
+            if (req.HttpMethod == "GET" && path == "/benchmark/suites") { HandleBenchSuites(res, modelsDirectory); return; }
+            if (req.HttpMethod == "GET" && path == "/benchmark/runs") { HandleBenchRuns(res, modelsDirectory); return; }
+            if (req.HttpMethod == "GET" && path.StartsWith("/benchmark/run/", StringComparison.Ordinal))
+            {
+                HandleBenchRun(res, modelsDirectory, path["/benchmark/run/".Length..],
+                    wantReport: req.QueryString["format"] == "md");
+                return;
+            }
+            if (req.HttpMethod == "POST" && path == "/benchmark/cancel")
+            {
+                bench.Cancel();
+                WriteJson(res, 200, new { ok = true });
+                return;
+            }
+            if (req.HttpMethod == "POST" && path == "/benchmark")
+            {
+                if (training.IsTraining) { WriteJson(res, 409, new { error = "a training job is in progress; try again when it finishes" }); return; }
+                HandleBenchStart(req, res, compute, bench, modelsDirectory);
+                return;
+            }
+            if (req.HttpMethod == "POST" && path == "/score")
+            {
+                if (GpuBusy(training, bench) is { } busyScore) { WriteJson(res, 409, new { error = busyScore }); return; }
+                HandleScore(req, res, compute, modelsDirectory, defaultModel);
                 return;
             }
 
             if (req.HttpMethod == "POST" && path == "/generate")
             {
-                if (training.IsTraining) { WriteJson(res, 409, new { error = "a training job is in progress; try again when it finishes" }); return; }
+                if (GpuBusy(training, bench) is { } busy) { WriteJson(res, 409, new { error = busy }); return; }
                 HandleGenerate(req, res, compute, defaultModel);
                 return;
             }
@@ -173,7 +218,7 @@ internal static class Server
                 return;
             }
 
-            WriteJson(res, 404, new { error = "not found; use GET /health, GET /models, GET /train/status, POST /generate, or POST /train" });
+            WriteJson(res, 404, new { error = "not found; use GET /health, GET /models, GET /train/status, GET /memory, GET /benchmark/status, POST /generate, POST /train, POST /benchmark, or POST /score" });
         }
         catch (Exception ex)
         {
@@ -505,6 +550,162 @@ internal static class Server
         };
     }
 
+    // ---- benchmark endpoints ----------------------------------------------------------------------------------
+
+    private static object BenchStatus(BenchmarkService bench)
+    {
+        var job = bench.Current;
+        if (job is null) return new { state = "idle" };
+        return new
+        {
+            state = job.Status, // running | done | canceled | error
+            runId = job.RunId,
+            suite = job.SuiteId,
+            models = job.Models,
+            backend = job.Backend,
+            done = job.Done,
+            total = job.Total,
+            currentModel = job.CurrentModel,
+            currentCase = job.CurrentCase,
+            error = job.Error,
+        };
+    }
+
+    private sealed record BenchIn(
+        string? Suite, string[]? Models, string? Backend, ulong? Seed, bool? Sample, int? Repeats);
+
+    private static void HandleBenchStart(
+        HttpListenerRequest req, HttpListenerResponse res, ComputeRegistry compute, BenchmarkService bench,
+        string modelsDirectory)
+    {
+        const int maxBody = 64 << 10;
+        if (req.ContentLength64 > maxBody) { WriteJson(res, 413, new { error = "request body too large" }); return; }
+        string body;
+        using (var reader = new StreamReader(req.InputStream, req.ContentEncoding)) body = reader.ReadToEnd();
+
+        BenchIn? br;
+        try { br = JsonSerializer.Deserialize<BenchIn>(body, JsonOpts); }
+        catch (JsonException) { WriteJson(res, 400, new { error = "invalid JSON body" }); return; }
+        if (br is null || br.Models is not { Length: > 0 }) { WriteJson(res, 400, new { error = "missing 'models'" }); return; }
+        int repeats = br.Repeats ?? 3;
+        if (repeats is < 1 or > 20) { WriteJson(res, 400, new { error = "repeats must be in [1, 20]" }); return; }
+
+        var request = new BenchStartRequest(
+            string.IsNullOrEmpty(br.Suite) ? "baseline" : br.Suite,
+            br.Models,
+            string.IsNullOrEmpty(br.Backend) ? compute.DefaultId : br.Backend,
+            br.Seed is > 0 ? br.Seed.Value : 12345,
+            br.Sample ?? false,
+            repeats);
+        var (ok, message, runId, total) = bench.Start(compute, modelsDirectory, request, InferenceLock);
+        if (!ok)
+        {
+            WriteJson(res, message.Contains("already in progress") ? 409 : 400, new { error = message });
+            return;
+        }
+        WriteJson(res, 202, new { status = "started", runId, total, suite = request.Suite, backend = request.Backend });
+    }
+
+    private static void HandleBenchSuites(HttpListenerResponse res, string modelsDirectory)
+    {
+        var suites = new List<object>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string dir in new[]
+                 {
+                     Path.Combine(modelsDirectory, "benchmarks", "suites"),
+                     Path.Combine("benchmarks", "suites"), // repo-relative fallback (the checked-in baseline)
+                 })
+        {
+            if (!Directory.Exists(dir)) continue;
+            foreach (string file in Directory.GetFiles(dir, "*.json"))
+            {
+                string id = Path.GetFileNameWithoutExtension(file);
+                if (!seen.Add(id)) continue;
+                try
+                {
+                    var suite = ProjectAI.Bench.SuiteLoader.Load(file, modelsDirectory);
+                    suites.Add(new { id = suite.Id, label = suite.Label, caseCount = suite.Cases.Count, hasCorpus = suite.EvalCorpus is not null });
+                }
+                catch (Exception) { suites.Add(new { id, label = id + " (unreadable)", caseCount = 0, hasCorpus = false }); }
+            }
+        }
+        WriteJson(res, 200, new { suites });
+    }
+
+    private static void HandleBenchRuns(HttpListenerResponse res, string modelsDirectory)
+    {
+        var runs = ProjectAI.Bench.BenchRunner.ListRuns(modelsDirectory).Select(r => new
+        {
+            id = r.Id,
+            suiteId = r.SuiteId,
+            models = r.Config.Models,
+            backend = r.Backend,
+            startedUtc = r.StartedUtc,
+            state = r.State,
+            cases = r.Cells.Count(c => c.CaseId != "__bpb__"),
+        });
+        WriteJson(res, 200, new { runs });
+    }
+
+    // GET /benchmark/run/{id} — the full run (cells + aggregates), camelCased for the wire. ?format=md returns the
+    // rendered markdown report instead.
+    private static void HandleBenchRun(HttpListenerResponse res, string modelsDirectory, string id, bool wantReport)
+    {
+        if (id.Length == 0 || id.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) { WriteJson(res, 400, new { error = "invalid run id" }); return; }
+
+        var run = ProjectAI.Bench.BenchRunner.LoadRun(modelsDirectory, id);
+        if (run is null) { WriteJson(res, 404, new { error = $"no run '{id}'" }); return; }
+        if (wantReport)
+        {
+            WriteJson(res, 200, new { id = run.Id, markdown = ProjectAI.Bench.BenchReporter.Markdown(run) });
+            return;
+        }
+        WriteJson(res, 200, JsonSerializer.SerializeToElement(run, BenchWireOpts));
+    }
+
+    private static readonly JsonSerializerOptions BenchWireOpts = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+    private sealed record ScoreIn(string? Model, string? Text);
+
+    // POST /score {model?, text} → bpb of the text under that model — the building block behind the bench's
+    // quality column, exposed so a client can probe "how surprised is this model by my document".
+    private static void HandleScore(
+        HttpListenerRequest req, HttpListenerResponse res, ComputeRegistry compute, string modelsDirectory, string defaultModel)
+    {
+        const int maxBody = 1 << 20;
+        if (req.ContentLength64 > maxBody) { WriteJson(res, 413, new { error = "request body too large" }); return; }
+        string body;
+        using (var reader = new StreamReader(req.InputStream, req.ContentEncoding)) body = reader.ReadToEnd();
+
+        ScoreIn? sr;
+        try { sr = JsonSerializer.Deserialize<ScoreIn>(body, JsonOpts); }
+        catch (JsonException) { WriteJson(res, 400, new { error = "invalid JSON body" }); return; }
+        if (sr is null || string.IsNullOrEmpty(sr.Text)) { WriteJson(res, 400, new { error = "missing 'text'" }); return; }
+
+        string modelName = string.IsNullOrEmpty(sr.Model) ? defaultModel : sr.Model;
+        var loaded = compute.Resolve(compute.DefaultId).Models.Get(modelName);
+        if (loaded is null) { WriteJson(res, 400, new { error = $"unknown model '{modelName}'" }); return; }
+
+        try
+        {
+            double bpb;
+            var (backend, _) = compute.Resolve(compute.DefaultId);
+            lock (InferenceLock)
+            {
+                bpb = ProjectAI.Bench.BpbScorer.Score(backend, loaded.Model, loaded.Tokenizer, loaded.Config, sr.Text);
+            }
+            var ids = loaded.Tokenizer.Encode(sr.Text);
+            WriteJson(res, 200, new
+            {
+                model = modelName,
+                tokens = ids.Count,
+                bytes = System.Text.Encoding.UTF8.GetByteCount(sr.Text),
+                bpb = Math.Round(bpb, 4),
+            });
+        }
+        catch (Exception ex) { WriteJson(res, 500, new { error = ex.Message }); }
+    }
+
     private sealed record ChatIn(
         string? Type, string? Model, string? Backend, string? Text,
         bool? Sample, float? Temperature, int? TopK, float? TopP, int? MaxTokens, ulong? Seed,
@@ -519,7 +720,8 @@ internal static class Server
     // Each turn generates on its OWN task so this loop stays free to read the next frame while a reply streams —
     // that's what lets a "cancel" land mid-generation (the decode loop checks the token each step) and lets a client
     // disconnect stop the work on the host instead of running the GPU to completion with no one listening.
-    private static void RunChat(HttpListenerContext ctx, ComputeRegistry compute, string defaultModel)
+    private static void RunChat(HttpListenerContext ctx, ComputeRegistry compute, TrainingService training,
+        BenchmarkService bench, string defaultModel)
     {
         WebSocket socket;
         try { socket = ctx.AcceptWebSocketAsync(null).GetAwaiter().GetResult().WebSocket; }
@@ -559,6 +761,9 @@ internal static class Server
 
                     case "start":
                         if (TurnRunning()) { SendSafe(new { type = "error", error = "a response is still generating" }); break; }
+                        // Chat was the gate hole: a session open runs a forward (the memory bridge ingest) and must
+                        // not contend with a train/bench job for the GPU or share the non-thread-safe backend.
+                        if (GpuBusy(training, bench) is { } busyStart) { SendSafe(new { type = "error", error = busyStart }); break; }
                         try
                         {
                             lock (InferenceLock) { session = OpenSession(compute, defaultModel, m); }
@@ -571,6 +776,7 @@ internal static class Server
                     case "message":
                         if (session is null) { SendSafe(new { type = "error", error = "send a 'start' message first" }); break; }
                         if (TurnRunning()) { SendSafe(new { type = "error", error = "a response is still generating" }); break; }
+                        if (GpuBusy(training, bench) is { } busyTurn) { SendSafe(new { type = "error", error = busyTurn }); break; }
                         turnCts?.Dispose();
                         turnCts = new CancellationTokenSource();
                         ChatSession active = session;       // fresh locals so the task captures this turn's values

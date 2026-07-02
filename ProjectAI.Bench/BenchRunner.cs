@@ -15,12 +15,19 @@ namespace ProjectAI.Bench;
 /// </summary>
 public static class BenchRunner
 {
-    /// <summary>Per-case progress: (model, caseId, done, total). Cancellation is checked between generations.</summary>
+    /// <summary>
+    /// Per-case progress: (model, caseId, done, total). Cancellation is checked between generations.
+    /// <paramref name="exclusive"/> wraps every backend-touching unit (model load, bpb pass, one case) — the serve
+    /// endpoint passes the InferenceLock here so the backend is never used from two threads, while the lock is
+    /// released between cases and /health stays responsive. The CLI leaves it null (no other backend user).
+    /// </summary>
     public static BenchRun Run(
         IComputeBackend be, string backendId, string modelsDir, BenchSuite suite, BenchRunConfig config,
-        Action<string, string, int, int>? onProgress = null, CancellationToken cancel = default)
+        Action<string, string, int, int>? onProgress = null, CancellationToken cancel = default,
+        Action<Action>? exclusive = null, string? runId = null)
     {
-        string runId = $"bench-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}";
+        exclusive ??= static work => work();
+        runId ??= NewRunId();
         string started = DateTime.UtcNow.ToString("O");
         var cells = new List<CellResult>();
         var stamps = new List<ModelStamp>();
@@ -34,13 +41,13 @@ public static class BenchRunner
             if (cancel.IsCancellationRequested) { state = "canceled"; break; }
 
             string path = Path.Combine(modelsDir, modelName + ".ckpt");
-            LlamaModel model;
-            ModelConfig modelConfig;
-            Tokenizers.ITokenizer tokenizer;
-            int step;
+            LlamaModel model = null!;
+            ModelConfig modelConfig = null!;
+            Tokenizers.ITokenizer tokenizer = null!;
             try
             {
-                (model, modelConfig, tokenizer, step) = Checkpointing.LoadModel(path, be);
+                int step = 0;
+                exclusive(() => (model, modelConfig, tokenizer, step) = Checkpointing.LoadModel(path, be));
                 stamps.Add(new ModelStamp(modelName, step, CountParams(modelConfig),
                     $"d{modelConfig.EmbeddingDim}·L{modelConfig.LayerCount}·h{modelConfig.HeadCount}/{modelConfig.KvHeadCount}·ctx{modelConfig.MaxSequenceLength}",
                     Sha256Of(path)));
@@ -56,7 +63,7 @@ public static class BenchRunner
             // bpb once per model (not per case): the corpus is the quality probe, the cases are behavior probes.
             if (!string.IsNullOrEmpty(suite.EvalCorpus))
             {
-                try { bpbByModel[modelName] = BpbScorer.Score(be, model, tokenizer, modelConfig, suite.EvalCorpus); }
+                try { exclusive(() => bpbByModel[modelName] = BpbScorer.Score(be, model, tokenizer, modelConfig, suite.EvalCorpus)); }
                 catch (Exception e) { cells.Add(new CellResult(modelName, "__bpb__", "", 0, 0, "error", 0, 0, [], 0, Error: $"bpb failed: {e.Message}")); }
             }
 
@@ -64,9 +71,18 @@ public static class BenchRunner
             {
                 if (cancel.IsCancellationRequested) { state = "canceled"; break; }
                 onProgress?.Invoke(modelName, benchCase.Id, done, total);
-                cells.Add(RunCase(be, model, tokenizer, modelConfig, modelName, benchCase, config, cancel));
+                CellResult cell = null!;
+                exclusive(() => cell = RunCase(be, model, tokenizer, modelConfig, modelName, benchCase, config, cancel));
+                cells.Add(cell);
                 done++;
             }
+
+            // Drop this model's weights before loading the next: on a GPU backend the buffers are reclaimed by
+            // finalizers, and CUDA pressure doesn't trigger the .NET GC on its own (same mitigation the trainer
+            // launcher uses) — without this a two-model run can stack two full models in VRAM.
+            model = null!;
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
         }
 
         var aggregates = Aggregate(config.Models, cells, bpbByModel);
@@ -116,6 +132,9 @@ public static class BenchRunner
             return new CellResult(modelName, benchCase.Id, "", 0, 0, "error", 0, 0, [], 0, Error: e.Message);
         }
     }
+
+    /// <summary>A fresh run id — generated up front by the serve endpoint so 202 can name the run it started.</summary>
+    public static string NewRunId() => $"bench-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}";
 
     /// <summary>Standard median (mean of the middle pair for even counts); 0 for an empty list.</summary>
     public static double Median(IReadOnlyList<double> values)
