@@ -15,8 +15,16 @@ public partial class TurnCard : VBoxContainer
 
     public TurnCard(string prompt, int fontSize)
     {
-        AddThemeConstantOverride("separation", 6);
-        AddChild(Card("You", prompt, Palette.UserBubble, Palette.Text, out _promptBody));
+        AddThemeConstantOverride("separation", 8);
+        // The user's turn is a right-aligned bubble at ~72% width (the mockup's chat convention: your messages on
+        // the right, the model's replies full-width); the response card below spans the column.
+        var userRow = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        userRow.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill, SizeFlagsStretchRatio = 28 });
+        var bubble = Card(null, prompt, Palette.UserBubble, Palette.Text, out _promptBody);
+        bubble.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        bubble.SizeFlagsStretchRatio = 72;
+        userRow.AddChild(bubble);
+        AddChild(userRow);
         AddChild(ResponseCard(out _response, out _note, out _sources, out _spinner));
         SetFontSize(fontSize);
     }
@@ -147,13 +155,12 @@ public partial class TurnCard : VBoxContainer
     private static PanelContainer Card(string speaker, string text, Color background, Color textColor, out Label body)
     {
         var panel = new PanelContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        Palette.StylePanel(panel, background, radius: 10, pad: 12);
+        Palette.StylePanel(panel, background, radius: Palette.Radius.Md, pad: 12);
 
         var column = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
         column.AddThemeConstantOverride("separation", 4);
 
-        var caption = Palette.Heading(speaker, 11, Palette.Muted);
-        column.AddChild(caption);
+        if (speaker is not null) column.AddChild(Palette.Heading(speaker, 11, Palette.Muted)); // user bubbles are captionless
 
         body = new Label
         {

@@ -1,35 +1,71 @@
 using System;
 using Godot;
 
-// The bottom input panel: a prompt box and a compact action row (a "settings" button that opens a popup, plus
-// Send). Model, compute backend, and the sampling/length controls live in the popup — Claude-style — so the
-// composer stays uncluttered and the Send button is always visible. It emits a single Submitted(GenerateRequest);
-// the rest of the app never touches temperature/top-k/etc. SetBusy/SetPrompt are the only ways outside code drives it.
+// The bottom input panel, matching the design harness's composer (prototype/js/views/chat.js): the Model and
+// Backend pickers sit VISIBLE in the card (switching models is the product, not an advanced setting), Memory and
+// Web are toggle chips, then the prompt box and a compact action row — an "Advanced" popup for sampling / response
+// length / seed / text size, and Send (which doubles as Stop while a reply streams). It emits a single
+// Submitted(GenerateRequest); SettingsChanged fires on any setting change so the host persists a Snapshot() to prefs.
 public partial class Composer : PanelContainer
 {
     public event Action<GenerateRequest> Submitted;
     public event Action<int> FontSizeChanged;
     public event Action Canceled; // the Send button doubles as Stop while a reply streams
-    public event Action SettingsChanged; // any popup setting changed — the host persists a Snapshot() to prefs
+    public event Action SettingsChanged; // any setting changed — the host persists a Snapshot() to prefs
 
     private TextEdit _prompt;
-    private Button _settingsButton;
     private Button _send;
+    private Button _advanced;
+    private Label _status;
     private bool _busy;
 
-    private PopupPanel _settingsPopup;
     private OptionButton _model;
     private BackendPicker _backend;
-    private CheckButton _sample, _capLength, _research, _memory;
+    private Button _memory, _research; // toggle chips
+
+    private PopupPanel _advancedPopup;
+    private CheckButton _sample, _capLength;
     private SpinBox _temperature, _topK, _topP, _maxTokens, _fontSize, _seed;
 
     public override void _Ready()
     {
-        Palette.StylePanel(this, Palette.InputBg, radius: 14, pad: 10, border: 1, borderColor: Palette.Border);
+        Palette.StylePanel(this, Palette.InputBg, radius: Palette.Radius.Lg, pad: 12, border: 1, borderColor: Palette.Border);
 
         var column = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        column.AddThemeConstantOverride("separation", 8);
+        column.AddThemeConstantOverride("separation", Palette.Space.Sm);
         AddChild(column);
+
+        // Pickers, visible like the mockup's 2-column grid.
+        var pickers = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        pickers.AddThemeConstantOverride("separation", Palette.Space.Sm);
+        _model = new OptionButton
+        {
+            TooltipText = "Model",
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            SizeFlagsStretchRatio = 3,
+        };
+        _model.ItemSelected += _ => SettingsChanged?.Invoke();
+        pickers.AddChild(_model);
+        _backend = new BackendPicker { SizeFlagsHorizontal = SizeFlags.ExpandFill, SizeFlagsStretchRatio = 2 };
+        _backend.ItemSelected += _ => SettingsChanged?.Invoke();
+        pickers.AddChild(_backend);
+        column.AddChild(pickers);
+
+        // Toggle chips + a live status span (mockup: brain + world-search chips).
+        var chips = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        chips.AddThemeConstantOverride("separation", Palette.Space.Sm);
+        _memory = Palette.Chip("🧠  Memory");
+        _memory.TooltipText = "Attach this model's long-term memory store to the conversation (toggling restarts the session).";
+        _memory.Toggled += _ => SettingsChanged?.Invoke();
+        chips.AddChild(_memory);
+        _research = Palette.Chip("🌐  Web");
+        _research.TooltipText = "Ground answers in a live web search with citations (needs a Tavily key — Settings → Web search).";
+        _research.Toggled += _ => SettingsChanged?.Invoke();
+        chips.AddChild(_research);
+        _status = Palette.Heading("", Palette.Type.Caption, Palette.Muted);
+        _status.SizeFlagsVertical = SizeFlags.ShrinkCenter;
+        chips.AddChild(_status);
+        column.AddChild(chips);
 
         _prompt = new TextEdit
         {
@@ -44,47 +80,31 @@ public partial class Composer : PanelContainer
         column.AddChild(_prompt);
 
         var actions = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        actions.AddThemeConstantOverride("separation", 8);
-        column.AddChild(actions);
-
-        // Opens the model/backend/sampling popup; its label reflects the current model + backend (Claude-style).
-        _settingsButton = Palette.GhostButton("⚙  Model & settings");
-        _settingsButton.Pressed += OpenSettings;
-        actions.AddChild(_settingsButton);
-
+        actions.AddThemeConstantOverride("separation", Palette.Space.Sm);
+        _advanced = Palette.GhostButton("⚙  Advanced", Palette.Type.Label);
+        _advanced.TooltipText = "Sampling, response length, seed, and text size";
+        _advanced.Pressed += OpenAdvanced;
+        actions.AddChild(_advanced);
         actions.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill }); // push Send to the right
-
         _send = Palette.PrimaryButton("Send  ↵");
         _send.Pressed += OnSendPressed;
         actions.AddChild(_send);
+        column.AddChild(actions);
 
-        BuildSettingsPopup();
-        UpdateSettingsButton();
+        BuildAdvancedPopup();
     }
 
-    // The settings popup: model + backend pickers, a sampling toggle with its decoding controls, and max length.
-    private void BuildSettingsPopup()
+    // Sampling / length / appearance — genuinely advanced settings; everything product-level lives in the card.
+    private void BuildAdvancedPopup()
     {
-        _settingsPopup = new PopupPanel();
-        _settingsPopup.AddThemeStyleboxOverride("panel",
-            Palette.Box(Palette.PanelBg, radius: 12, pad: 16, border: 1, borderColor: Palette.Border));
-        AddChild(_settingsPopup);
+        _advancedPopup = new PopupPanel();
+        _advancedPopup.AddThemeStyleboxOverride("panel",
+            Palette.Box(Palette.PanelBg, radius: Palette.Radius.Md, pad: Palette.Space.Lg, border: 1, borderColor: Palette.Border));
+        AddChild(_advancedPopup);
 
         var col = new VBoxContainer { CustomMinimumSize = new Vector2(360, 0) };
         col.AddThemeConstantOverride("separation", 10);
-        _settingsPopup.AddChild(col);
-
-        col.AddChild(Palette.Heading("Model", 12, Palette.Muted));
-        _model = new OptionButton { TooltipText = "Model", SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        _model.ItemSelected += _ => { UpdateSettingsButton(); SettingsChanged?.Invoke(); };
-        col.AddChild(_model);
-
-        col.AddChild(Palette.Heading("Compute backend", 12, Palette.Muted));
-        _backend = new BackendPicker { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        _backend.ItemSelected += _ => { UpdateSettingsButton(); SettingsChanged?.Invoke(); };
-        col.AddChild(_backend);
-
-        col.AddChild(new HSeparator());
+        _advancedPopup.AddChild(col);
 
         _sample = new CheckButton { Text = "Sample  (off = greedy / deterministic)" };
         _sample.AddThemeColorOverride("font_color", Palette.Text);
@@ -110,25 +130,7 @@ public partial class Composer : PanelContainer
         _maxTokens.ValueChanged += _ => SettingsChanged?.Invoke();
 
         col.AddChild(new HSeparator());
-        col.AddChild(Palette.Heading("Web research", 12, Palette.Muted));
-        // When on, the server runs a live web search for the prompt and grounds the answer in the results (RAG),
-        // returning the sources for citation. Needs TAVILY_API_KEY set on the server, else the turn errors clearly.
-        _research = new CheckButton { Text = "🌐  Search the web and answer from current results" };
-        _research.AddThemeColorOverride("font_color", Palette.Text);
-        _research.Toggled += _ => SettingsChanged?.Invoke();
-        col.AddChild(_research);
-
-        col.AddChild(new HSeparator());
-        col.AddChild(Palette.Heading("Memory", 12, Palette.Muted));
-        // When on, the chat session attaches this model's server-side memory store: pinned facts are baked into the
-        // warm cache at session start, and each message recalls relevant memories. Toggling it restarts the session.
-        _memory = new CheckButton { Text = "🧠  Use long-term memory for this conversation" };
-        _memory.AddThemeColorOverride("font_color", Palette.Text);
-        _memory.Toggled += _ => SettingsChanged?.Invoke();
-        col.AddChild(_memory);
-
-        col.AddChild(new HSeparator());
-        col.AddChild(Palette.Heading("Appearance", 12, Palette.Muted));
+        col.AddChild(Palette.Heading("Appearance", Palette.Type.Caption, Palette.Muted));
         _fontSize = Param(col, "Text size", 11, 28, 1, Palette.DefaultFontSize); // resizes the conversation text live
         _fontSize.ValueChanged += v => FontSizeChanged?.Invoke((int)v);
 
@@ -136,7 +138,7 @@ public partial class Composer : PanelContainer
         OnCapToggled(false);    // dynamic length by default → the cap spinbox starts disabled
     }
 
-    /// <summary>Seeds every popup control from persisted prefs (called once by the host view after construction).
+    /// <summary>Seeds every control from persisted prefs (called once by the host view after construction).
     /// Values are set directly — the resulting change events just re-persist identical values, which is harmless.</summary>
     public void ApplyPrefs(ClientPrefs p)
     {
@@ -154,7 +156,7 @@ public partial class Composer : PanelContainer
         _fontSize.Value = p.FontSize;
     }
 
-    /// <summary>The current popup settings as a request with an empty prompt — what the host persists to prefs.</summary>
+    /// <summary>The current settings as a request with an empty prompt — what the host persists to prefs.</summary>
     public GenerateRequest Snapshot() => BuildRequest("");
 
     public void SetBusy(bool busy)
@@ -162,9 +164,10 @@ public partial class Composer : PanelContainer
         _busy = busy;
         _send.Disabled = false;                 // stays clickable while busy — it's the Stop button now
         _send.Text = busy ? "Stop  ◼" : "Send  ↵";
+        _status.Text = busy ? "Generating…" : "";
     }
 
-    // The primary button sends a prompt when idle and cancels the streaming reply while busy (Claude-style).
+    // The primary button sends a prompt when idle and cancels the streaming reply while busy (mockup-style).
     private void OnSendPressed()
     {
         if (!_busy) { Submit(); return; }
@@ -189,7 +192,6 @@ public partial class Composer : PanelContainer
         int keep = System.Array.IndexOf(models, previous);
         int fallback = System.Array.IndexOf(models, defaultModel);
         _model.Selected = Selection.FirstValid(keep, fallback, models.Length > 0 ? 0 : -1);
-        UpdateSettingsButton();
     }
 
     private string SelectedModel() => _model is { Selected: >= 0 } ? _model.GetItemText(_model.Selected) : "";
@@ -202,37 +204,22 @@ public partial class Composer : PanelContainer
             if (_model.GetItemText(i) == name)
             {
                 _model.Selected = i;
-                UpdateSettingsButton();
                 return;
             }
     }
 
-    /// <summary>Populates the backend picker (shared <see cref="BackendPicker"/> logic), then refreshes the trigger label.</summary>
-    public void SetBackends(BackendOption[] backends, string defaultId)
-    {
-        _backend.SetBackends(backends, defaultId);
-        UpdateSettingsButton();
-    }
+    /// <summary>Populates the backend picker (shared <see cref="BackendPicker"/> logic).</summary>
+    public void SetBackends(BackendOption[] backends, string defaultId) => _backend.SetBackends(backends, defaultId);
 
-    // Reflects the current model + backend on the trigger button, e.g. "⚙  smol  ·  GPU (CUDA)".
-    private void UpdateSettingsButton()
-    {
-        string model = SelectedModel();
-        string backendLabel = _backend is { Selected: >= 0 } ? _backend.GetItemText(_backend.Selected) : "";
-        string label = string.IsNullOrEmpty(model) ? "Model & settings" : model;
-        if (!string.IsNullOrEmpty(backendLabel)) label += $"  ·  {backendLabel}";
-        _settingsButton.Text = $"⚙  {label}";
-    }
-
-    private void OpenSettings()
+    private void OpenAdvanced()
     {
         // The composer sits at the bottom, so open the popup above the button; fall below if there's no room.
-        var rect = _settingsButton.GetGlobalRect();
-        Vector2I size = (Vector2I)_settingsPopup.Size;
-        if (size.X < 50 || size.Y < 50) size = new Vector2I(392, 380); // first open: popup hasn't been sized yet
+        var rect = _advanced.GetGlobalRect();
+        Vector2I size = (Vector2I)_advancedPopup.Size;
+        if (size.X < 50 || size.Y < 50) size = new Vector2I(392, 360); // first open: popup hasn't been sized yet
         int y = (int)rect.Position.Y - size.Y - 8;
         if (y < 8) y = (int)(rect.Position.Y + rect.Size.Y + 8);
-        _settingsPopup.Popup(new Rect2I(new Vector2I((int)rect.Position.X, y), size));
+        _advancedPopup.Popup(new Rect2I(new Vector2I((int)rect.Position.X, y), size));
     }
 
     private void OnSampleToggled(bool on)
@@ -240,7 +227,7 @@ public partial class Composer : PanelContainer
         _temperature.Editable = on;
         _topK.Editable = on;
         _topP.Editable = on;
-        if (_seed != null) _seed.Editable = on; // built after the toggle's first programmatic fire
+        if (_seed != null) _seed.Editable = on;
     }
 
     private void OnCapToggled(bool on) => _maxTokens.Editable = on; // off → dynamic length (Submit sends maxTokens 0)
@@ -281,7 +268,7 @@ public partial class Composer : PanelContainer
         var row = new HBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
         row.AddThemeConstantOverride("separation", 10);
 
-        var caption = Palette.Heading(label, 13, Palette.Muted);
+        var caption = Palette.Heading(label, Palette.Type.Label, Palette.Muted);
         caption.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         row.AddChild(caption);
 

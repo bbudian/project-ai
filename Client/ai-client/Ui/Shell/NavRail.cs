@@ -17,7 +17,10 @@ public partial class NavRail : PanelContainer
     public override void _Ready()
     {
         CustomMinimumSize = new Vector2(236, 0);
-        Palette.StylePanel(this, Palette.SidebarBg, pad: Palette.Space.Md);
+        var box = Palette.Box(Palette.SidebarBg, pad: Palette.Space.Md);
+        box.BorderWidthRight = 1;
+        box.BorderColor = Palette.Border;
+        AddThemeStyleboxOverride("panel", box);
 
         _column = new VBoxContainer();
         _column.AddThemeConstantOverride("separation", Palette.Space.Md);
@@ -72,8 +75,10 @@ public partial class RailButton : Button
 
     public void SetActive(bool active)
     {
+        // The mockup's active nav treatment: accent-tinted background + accent text, not just a hover grey.
         AddThemeStyleboxOverride("normal",
-            Palette.Box(active ? Palette.Hover : Palette.Transparent, radius: Palette.Radius.Sm, pad: 8));
-        AddThemeColorOverride("font_color", active ? Palette.Text : Palette.Muted);
+            Palette.Box(active ? new Color(Palette.Accent, 0.14f) : Palette.Transparent, radius: Palette.Radius.Sm, pad: 8));
+        AddThemeColorOverride("font_color", active ? Palette.Accent : Palette.Muted);
+        AddThemeColorOverride("font_hover_color", active ? Palette.Accent : Palette.Text);
     }
 }

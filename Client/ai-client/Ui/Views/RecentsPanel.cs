@@ -15,7 +15,10 @@ public partial class RecentsPanel : PanelContainer
     public override void _Ready()
     {
         CustomMinimumSize = new Vector2(220, 0);
-        Palette.StylePanel(this, Palette.SidebarBg, pad: Palette.Space.Md);
+        var box = Palette.Box(Palette.SidebarBg, pad: Palette.Space.Md);
+        box.BorderWidthRight = 1;
+        box.BorderColor = Palette.Border;
+        AddThemeStyleboxOverride("panel", box);
 
         var column = new VBoxContainer();
         column.AddThemeConstantOverride("separation", Palette.Space.Md);

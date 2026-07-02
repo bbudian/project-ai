@@ -15,7 +15,8 @@ public partial class Transcript : ScrollContainer
         SizeFlagsHorizontal = SizeFlags.ExpandFill;
         SizeFlagsVertical = SizeFlags.ExpandFill;
 
-        _column = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill };
+        // Vertical ExpandFill lets the empty-state center in the viewport; with real content the column just grows.
+        _column = new VBoxContainer { SizeFlagsHorizontal = SizeFlags.ExpandFill, SizeFlagsVertical = SizeFlags.ExpandFill };
         _column.AddThemeConstantOverride("separation", 12);
         AddChild(_column);
 
@@ -52,7 +53,8 @@ public partial class Transcript : ScrollContainer
 
     private void ShowPlaceholder()
     {
-        _placeholder = Palette.Heading("Type a prompt below and press Send.", 14, Palette.Muted);
+        _placeholder = Palette.EmptyState("💬", "Start a conversation",
+            "Pick a model below and say something — replies stream in token by token.");
         _column.AddChild(_placeholder);
     }
 }

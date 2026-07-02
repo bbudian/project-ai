@@ -53,6 +53,10 @@ public partial class ChatView : HBoxContainer, IView
         headerRow.AddChild(_instruct);
         _meter = Palette.Heading("", Palette.Type.Caption, Palette.Muted);
         headerRow.AddChild(_meter);
+        var clear = Palette.GhostButton("Clear", Palette.Type.Label);
+        clear.TooltipText = "Clear the conversation (the next message starts a fresh session).";
+        clear.Pressed += OnNewChat;
+        headerRow.AddChild(clear);
         header.AddChild(headerRow);
         column.AddChild(header);
 

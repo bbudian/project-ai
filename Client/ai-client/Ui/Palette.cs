@@ -91,6 +91,21 @@ public static class Palette
         return button;
     }
 
+    /// <summary>A pill toggle chip (the mockup's Memory/Web toggles): outlined when off, accent-tinted when on.</summary>
+    public static Button Chip(string text)
+    {
+        var chip = new Button { Text = text, ToggleMode = true, Flat = true };
+        chip.AddThemeStyleboxOverride("normal", Box(Transparent, radius: Radius.Pill, pad: 6, border: 1, borderColor: Border));
+        chip.AddThemeStyleboxOverride("hover", Box(Hover, radius: Radius.Pill, pad: 6, border: 1, borderColor: Border));
+        chip.AddThemeStyleboxOverride("pressed", Box(new Color(Accent, 0.18f), radius: Radius.Pill, pad: 6, border: 1, borderColor: new Color(Accent, 0.5f)));
+        chip.AddThemeStyleboxOverride("focus", Box(Transparent));
+        chip.AddThemeColorOverride("font_color", Muted);
+        chip.AddThemeColorOverride("font_hover_color", Text);
+        chip.AddThemeColorOverride("font_pressed_color", Accent);
+        chip.AddThemeFontSizeOverride("font_size", Type.Label);
+        return chip;
+    }
+
     /// <summary>A solid accent button — the primary action (Send).</summary>
     public static Button PrimaryButton(string text)
     {
