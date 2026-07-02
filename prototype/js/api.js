@@ -166,6 +166,60 @@
     };
   };
 
+  // === server discovery + remote stop =======================================
+  // findServers() probes localhost ports 8080-8089 (plus the configured port)
+  // with GET /health in parallel — CORS allows the reads. The desktop app also
+  // reads the machine registry (%LOCALAPPDATA%/ProjectAI/servers), which a
+  // browser can't; the port scan is the same-UI browser equivalent.
+  api.findServers = function () {
+    var ports = [];
+    for (var p = 8080; p <= 8089; p++) ports.push(p);
+    try {
+      var current = new URL(base());
+      if (current.port && ports.indexOf(+current.port) < 0) ports.push(+current.port);
+    } catch (e) { /* unparseable base URL — scan the defaults */ }
+
+    var probes = ports.map(function (port) {
+      var url = 'http://localhost:' + port;
+      var ctrl = new AbortController();
+      var t = setTimeout(function () { ctrl.abort(); }, 1200);
+      return fetch(url + '/health', { signal: ctrl.signal })
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (d) {
+          if (!d) return null;
+          return {
+            url: url, port: port,
+            pid: d.pid != null ? d.pid : 0,
+            models: (d.models || []).length,
+            backend: d.defaultBackend || '',
+            alive: true,
+          };
+        })
+        .catch(function () { return null; })
+        .finally(function () { clearTimeout(t); });
+    });
+    return Promise.all(probes).then(function (all) {
+      return all.filter(function (s) { return !!s; });
+    });
+  };
+
+  // PUT /shutdown (absolute URL — any server, not just the configured one).
+  // PUT is deliberate server-side: cross-origin PUTs are preflight-blocked, so
+  // from this harness Live-mode Stop fails with the named CORS explanation.
+  api.shutdownServer = function (url) {
+    var ctrl = new AbortController();
+    var t = setTimeout(function () { ctrl.abort(); }, 3000);
+    // An explicit empty JSON body: http.sys rejects a body-less PUT with 411 before the handler runs.
+    return fetch(String(url).replace(/\/+$/, '') + '/shutdown',
+      { method: 'PUT', body: '{}', headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal })
+      .then(function (res) { return { ok: res.ok }; })
+      .catch(function () {
+        throw new Error('cross-origin PUT writes are blocked by the server’s CORS policy — ' +
+          'use the desktop app to stop servers, or serve this harness from the same origin');
+      })
+      .finally(function () { clearTimeout(t); });
+  };
+
   // === tokenize ==============================================================
   // POST /tokenize {text, model} -> { model, vocab, count, tokens:[{id,text}], decoded }
   api.tokenize = function (req) {

@@ -68,9 +68,13 @@
       text: 'Not connected',
     });
 
+    // Discovery: every running server on this machine, with Connect/Stop per row (ServersDialog in the client).
+    var find = C.button('Servers…', { small: true, onClick: s.onFindServers || null });
+    find.title = 'Find running ProjectAI servers on this machine (port scan 8080-8089).';
+
     return el('div', { class: 'pa-rail-server', dataset: { role: 'server-panel' } },
       el('div', { class: ['pa-xs', 'pa-muted'], style: { fontWeight: '600' }, text: 'Server' }),
-      url, check, toggle, status
+      url, check, toggle, find, status
     );
   };
 

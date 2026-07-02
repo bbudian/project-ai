@@ -2,7 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Net.Http;
+using System.Text.Json;
+using System.Threading.Tasks;
 using Godot;
+
+/// <summary>A server found by discovery: from the machine registry (%LOCALAPPDATA%/ProjectAI/servers) and/or a
+/// port probe. <see cref="Alive"/> is false for a stale registry entry whose /health no longer answers.</summary>
+public sealed record DiscoveredServer(string Url, int Port, int Pid, int Models, string Backend, string Source, bool Alive);
 
 // Launches and supervises a local `projectai serve` as a child process — the "run models from this app" story:
 // Start spawns the server (its console stays visible so the logs are readable), then the controller polls /health
@@ -122,6 +130,87 @@ public partial class ServerController : Node
     {
         Starting = false;
         Error = message;
+        _pollTimer.Stop();
+        Changed?.Invoke();
+    }
+
+    // ---- multi-server discovery + remote stop -------------------------------------------------------------------
+
+    private static readonly System.Net.Http.HttpClient Probe = new() { Timeout = TimeSpan.FromMilliseconds(1200) }; // Godot has its own HttpClient type — qualify
+
+    private static string RegistryDir => Path.Combine(
+        System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "ProjectAI", "servers");
+
+    /// <summary>
+    /// Finds running servers: every port in the machine registry (servers self-register on startup) plus a probe
+    /// of the common ports 8080-8089 and the configured URL's port, all in parallel. A registry entry whose
+    /// /health doesn't answer is reported as stale rather than hidden, so leftovers from a crash are visible.
+    /// Await-safe from UI handlers — Godot's SynchronizationContext resumes on the main thread.
+    /// </summary>
+    public async Task<IReadOnlyList<DiscoveredServer>> DiscoverAsync()
+    {
+        var candidates = new Dictionary<int, (int Pid, string Source)>();
+        if (Directory.Exists(RegistryDir))
+            foreach (string file in Directory.GetFiles(RegistryDir, "*.json"))
+                try
+                {
+                    using var doc = JsonDocument.Parse(File.ReadAllText(file));
+                    int port = doc.RootElement.GetProperty("port").GetInt32();
+                    int pid = doc.RootElement.TryGetProperty("pid", out var p) ? p.GetInt32() : 0;
+                    candidates[port] = (pid, "registry");
+                }
+                catch (Exception) { /* unreadable entry — the port scan may still find it */ }
+        for (int port = 8080; port <= 8089; port++) candidates.TryAdd(port, (0, "scan"));
+        if (Uri.TryCreate(_state.ServerUrl, UriKind.Absolute, out var current) && current.Port > 0)
+            candidates.TryAdd(current.Port, (0, "scan"));
+
+        var probes = candidates.Select(async kv =>
+        {
+            string url = $"http://localhost:{kv.Key}";
+            try
+            {
+                string json = await Probe.GetStringAsync($"{url}/health");
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                return new DiscoveredServer(url, kv.Key,
+                    root.TryGetProperty("pid", out var pid) ? pid.GetInt32() : kv.Value.Pid,
+                    root.TryGetProperty("models", out var models) ? models.GetArrayLength() : 0,
+                    root.TryGetProperty("defaultBackend", out var backend) ? backend.GetString() ?? "" : "",
+                    kv.Value.Source, Alive: true);
+            }
+            catch (Exception)
+            {
+                // Only surface silent ports that CLAIMED to exist (registry) — dead scan ports are just noise.
+                return kv.Value.Source == "registry"
+                    ? new DiscoveredServer(url, kv.Key, kv.Value.Pid, 0, "", "registry — stale (not answering)", false)
+                    : null;
+            }
+        });
+        return (await Task.WhenAll(probes)).Where(s => s is not null).Select(s => s!).OrderBy(s => s.Port).ToList();
+    }
+
+    /// <summary>Asks any server to stop via PUT /shutdown (graceful: it deregisters and exits its accept loop).
+    /// PUT is deliberate — the server's CORS preflight blocks cross-origin PUTs, so only real clients can do this.</summary>
+    public async Task<bool> RequestShutdownAsync(string url)
+    {
+        try
+        {
+            // An explicit empty JSON body: http.sys rejects a body-less PUT with 411 before the handler runs.
+            using var body = new StringContent("{}", System.Text.Encoding.UTF8, "application/json");
+            using var response = await Probe.PutAsync(url.TrimEnd('/') + "/shutdown", body);
+            return response.IsSuccessStatusCode;
+        }
+        catch (Exception) { return false; }
+        finally { ReleaseIfExited(); }
+    }
+
+    /// <summary>Clears the bookkeeping for a spawned server that has since exited (e.g. stopped gracefully).</summary>
+    public void ReleaseIfExited()
+    {
+        if (_process is not { HasExited: true }) return;
+        _process.Dispose();
+        _process = null;
+        Starting = false;
         _pollTimer.Stop();
         Changed?.Invoke();
     }

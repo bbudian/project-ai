@@ -177,6 +177,29 @@
     };
   };
 
+  // === server discovery + remote stop =======================================
+  // A canned pair of servers; Stop removes one from the list (and "this" one
+  // disconnects the harness on the next health probe if it was selected).
+  var SERVERS = [
+    { url: 'http://localhost:8080', port: 8080, pid: 18412, models: 5, backend: 'torch:cuda', alive: true },
+    { url: 'http://localhost:8083', port: 8083, pid: 22047, models: 2, backend: 'cpu', alive: true },
+  ];
+
+  mock.findServers = function () {
+    return later(SERVERS.filter(function (s) { return s.alive; }).map(function (s) {
+      return Object.assign({}, s);
+    }), 350);
+  };
+
+  mock.shutdownServer = function (url) {
+    return later(null, 300).then(function () {
+      var found = SERVERS.filter(function (s) { return s.url === url; })[0];
+      if (!found || !found.alive) throw new Error('could not stop ' + url + ' (already gone?)');
+      found.alive = false;
+      return { ok: true };
+    });
+  };
+
   // === tokenize =============================================================
   mock.tokenize = function (req) {
     req = req || {};

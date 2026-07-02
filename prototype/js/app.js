@@ -111,6 +111,74 @@
       if (PA.settingsModal) PA.settingsModal.open();
     },
 
+    // The "Servers…" dialog (ServersDialog.cs in the client): every running server on this machine, with
+    // Connect/Stop per row. The browser variant scans ports (CORS allows the GET /health reads); the desktop
+    // app additionally reads the machine registry. Stop is PUT /shutdown — blocked cross-origin by design, so
+    // Live-mode Stop surfaces the named CORS explanation from api.js.
+    openServers: function () {
+      var listHost = el('div', {});
+      var status = el('div', { class: ['pa-xs', 'pa-muted'], style: { marginTop: '8px' } });
+      var modal = C.openModal('Running servers', el('div', {}, listHost, status));
+
+      function normalize(u) { return String(u || '').trim().replace(/\/+$/, '').toLowerCase(); }
+
+      function row(s) {
+        var isCurrent = normalize(PA.config.baseUrl) === normalize(s.url);
+        var desc = s.url + '   ·   ' + s.models + ' model' + (s.models === 1 ? '' : 's') +
+          (s.backend ? '   ·   ' + s.backend : '') + (s.pid ? '   ·   pid ' + s.pid : '');
+        var actions = [];
+        if (isCurrent) {
+          actions.push(C.badge('connected', 'accent'));
+        } else {
+          actions.push(C.button('Connect', {
+            small: true, ghost: true,
+            onClick: function () {
+              PA.config.baseUrl = s.url;
+              PA.saveConfig();
+              app.refreshHealth();
+              modal.close();
+            },
+          }));
+        }
+        var stop = C.button('Stop', {
+          small: true, ghost: true,
+          onClick: function () {
+            stop.disabled = true;
+            status.textContent = 'Stopping ' + s.url + '…';
+            PA.data().shutdownServer(s.url).then(function () {
+              status.textContent = 'Stopped ' + s.url + '.';
+              if (isCurrent) app.refreshHealth();
+              refresh();
+            }).catch(function (e) {
+              stop.disabled = false;
+              status.textContent = e.message || String(e);
+            });
+          },
+        });
+        stop.title = 'Graceful stop via PUT /shutdown — the server deregisters and exits.';
+        actions.push(stop);
+        return el('div', { class: 'pa-server-row' },
+          el('span', { class: 'pa-server-row-desc', text: desc }), actions);
+      }
+
+      function refresh() {
+        PA.ui.mount(listHost, el('div', { class: ['pa-xs', 'pa-muted'], text: 'Scanning ports 8080-8089…' }));
+        PA.data().findServers().then(function (servers) {
+          var rows = servers.length
+            ? servers.map(row)
+            : [el('div', { class: 'pa-muted', text: 'No running servers found. Start one below, or run `projectai serve`.' })];
+          rows.push(el('div', {
+            class: ['pa-xs', 'pa-muted'], style: { marginTop: '8px' },
+            text: 'Port scan 8080-8089 — the desktop app also reads the machine registry.',
+          }));
+          PA.ui.mount(listHost, rows);
+        }).catch(function (e) {
+          PA.ui.mount(listHost, el('div', { class: 'pa-bad', text: 'Scan failed: ' + (e.message || e) }));
+        });
+      }
+      refresh();
+    },
+
     // (Re)render the nav rail + bottom tabs from the current registry + route.
     refreshNav: function () {
       var views = orderedViews();
@@ -126,6 +194,7 @@
           },
           onCheck: function () { app.refreshHealth(); },
           onToggle: app.onServerToggle,
+          onFindServers: app.openServers,
           starting: sim.starting,
           owns: sim.owns,
           startDisabled: !PA.config.useMock && !sim.owns,

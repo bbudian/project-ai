@@ -72,6 +72,9 @@ public partial class Main : Control
         AddChild(_server);
         connection.StartServerRequested += _server.Start;
         connection.StopServerRequested += _server.Stop;
+        var servers = new ServersDialog(_state, _api, _server);
+        AddChild(servers);
+        connection.FindServersRequested += servers.Open;
         _server.Changed += () => connection.SetServerState(_server.Starting, _server.OwnsRunningServer, _server.Error);
         _state.HealthChanged += () =>
         {

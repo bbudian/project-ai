@@ -10,6 +10,7 @@ public partial class ConnectionPanel : PanelContainer
     public event Action<string> UrlEdited;
     public event Action StartServerRequested;
     public event Action StopServerRequested;
+    public event Action FindServersRequested;
 
     private readonly AppState _state;
     private LineEdit _url;
@@ -45,6 +46,12 @@ public partial class ConnectionPanel : PanelContainer
             else StartServerRequested?.Invoke();
         };
         column.AddChild(_serverButton);
+
+        // Discovery: every running server on this machine, with Connect/Stop per row.
+        var find = new Button { Text = "Servers…" };
+        find.TooltipText = "Find running ProjectAI servers on this machine (registry + port scan).";
+        find.Pressed += () => FindServersRequested?.Invoke();
+        column.AddChild(find);
 
         _status = new Label { Text = "Not connected", AutowrapMode = TextServer.AutowrapMode.WordSmart };
         _status.AddThemeColorOverride("font_color", Palette.Muted);

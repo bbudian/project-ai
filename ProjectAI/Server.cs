@@ -74,8 +74,12 @@ internal static class Server
         string available = string.Join(", ", compute.AvailableBackends.Where(b => b.Available).Select(b => b.Id));
         Console.WriteLine($"Models in '{modelsDirectory}': {string.Join(", ", models)}   (default: {defaultModel})");
         Console.WriteLine($"Backends available: {available}   (default: {defaultBackendId})");
-        Console.WriteLine($"Serving on {prefix}  —  POST /generate, POST /tokenize, POST /train, GET /health, GET /models, WS /chat  (Ctrl+C to stop)");
+        Console.WriteLine($"Serving on {prefix}  —  POST /generate, POST /tokenize, POST /train, GET /health, GET /models, WS /chat, PUT /shutdown  (Ctrl+C to stop)");
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; listener.Stop(); };
+
+        _startedUtc = DateTime.UtcNow.ToString("O");
+        ServerRegistry.Register(port, modelsDirectory, defaultBackendId, defaultModel);
+        Action shutdown = () => { try { listener.Stop(); } catch (Exception) { /* already stopping */ } };
 
         while (listener.IsListening)
         {
@@ -89,10 +93,11 @@ internal static class Server
             // that lock, so they always answer — which is what lets a reopened client reconnect immediately.
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                try { Handle(ctx, compute, training, bench, modelsDirectory, defaultModel); }
+                try { Handle(ctx, compute, training, bench, modelsDirectory, defaultModel, shutdown); }
                 catch { /* never let one request take down the server process */ }
             });
         }
+        ServerRegistry.Remove(port); // Ctrl+C and PUT /shutdown both end here; a crash leaves a stale (probed) file
         Console.WriteLine("Server stopped.");
     }
 
@@ -103,8 +108,10 @@ internal static class Server
         : bench.IsBenchmarking ? "a benchmark run is in progress; try again when it finishes"
         : null;
 
+    private static string _startedUtc = "";
+
     private static void Handle(HttpListenerContext ctx, ComputeRegistry compute, TrainingService training,
-        BenchmarkService bench, string modelsDirectory, string defaultModel)
+        BenchmarkService bench, string modelsDirectory, string defaultModel, Action shutdown)
     {
         var req = ctx.Request;
         var res = ctx.Response;
@@ -126,6 +133,8 @@ internal static class Server
                 WriteJson(res, 200, new
                 {
                     status = "ok",
+                    pid = Environment.ProcessId,       // lets a discovery UI identify + describe this server
+                    startedUtc = _startedUtc,
                     models = compute.ListModels(), // names only — kept for back-compat with older clients
                     modelInfos = compute.ListModelInfos().Select(m => new
                     {
@@ -148,6 +157,16 @@ internal static class Server
                     training = TrainStatus(training),
                     bench = BenchStatus(bench),
                 });
+                return;
+            }
+
+            // Graceful remote stop. PUT (not POST) deliberately: the CORS preflight only allows GET/POST, so a
+            // drive-by web page cannot shut the server down through the user's browser; local clients are unaffected.
+            if (req.HttpMethod == "PUT" && path == "/shutdown")
+            {
+                Console.WriteLine("  ⇄ shutdown requested (PUT /shutdown)");
+                WriteJson(res, 200, new { ok = true, stopping = true });
+                shutdown(); // the accept loop exits and the registry entry is removed on the way out
                 return;
             }
 

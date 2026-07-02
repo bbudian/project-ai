@@ -287,3 +287,14 @@ textarea.pa-input { resize: vertical; min-height: 60px; line-height: var(--pa-lh
 .pa-tone-good { color: var(--pa-good); }
 .pa-tone-bad  { color: var(--pa-bad); }
 .pa-tone-muted { color: var(--pa-muted); }
+
+/* Server discovery rows (the "Servers…" dialog — ServersDialog.cs in the client). */
+.pa-server-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--pa-border);
+}
+.pa-server-row:last-of-type { border-bottom: none; }
+.pa-server-row-desc { flex: 1; font-size: 13px; color: var(--pa-text); word-break: break-all; }
