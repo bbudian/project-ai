@@ -10,6 +10,7 @@ public partial class Composer : PanelContainer
     public event Action<GenerateRequest> Submitted;
     public event Action<int> FontSizeChanged;
     public event Action Canceled; // the Send button doubles as Stop while a reply streams
+    public event Action SettingsChanged; // any popup setting changed — the host persists a Snapshot() to prefs
 
     private TextEdit _prompt;
     private Button _settingsButton;
@@ -20,7 +21,7 @@ public partial class Composer : PanelContainer
     private OptionButton _model;
     private BackendPicker _backend;
     private CheckButton _sample, _capLength, _research;
-    private SpinBox _temperature, _topK, _topP, _maxTokens;
+    private SpinBox _temperature, _topK, _topP, _maxTokens, _fontSize;
 
     public override void _Ready()
     {
@@ -75,24 +76,26 @@ public partial class Composer : PanelContainer
 
         col.AddChild(Palette.Heading("Model", 12, Palette.Muted));
         _model = new OptionButton { TooltipText = "Model", SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        _model.ItemSelected += _ => UpdateSettingsButton();
+        _model.ItemSelected += _ => { UpdateSettingsButton(); SettingsChanged?.Invoke(); };
         col.AddChild(_model);
 
         col.AddChild(Palette.Heading("Compute backend", 12, Palette.Muted));
         _backend = new BackendPicker { SizeFlagsHorizontal = SizeFlags.ExpandFill };
-        _backend.ItemSelected += _ => UpdateSettingsButton();
+        _backend.ItemSelected += _ => { UpdateSettingsButton(); SettingsChanged?.Invoke(); };
         col.AddChild(_backend);
 
         col.AddChild(new HSeparator());
 
         _sample = new CheckButton { Text = "Sample  (off = greedy / deterministic)" };
         _sample.AddThemeColorOverride("font_color", Palette.Text);
-        _sample.Toggled += OnSampleToggled;
+        _sample.Toggled += on => { OnSampleToggled(on); SettingsChanged?.Invoke(); };
         col.AddChild(_sample);
 
         _temperature = Param(col, "Temperature", 0, 2, 0.05, 0.8);
         _topK = Param(col, "Top-K", 0, 200, 1, 40);
         _topP = Param(col, "Top-P", 0.05, 1, 0.05, 0.9);
+        foreach (var spin in new[] { _temperature, _topK, _topP })
+            spin.ValueChanged += _ => SettingsChanged?.Invoke();
 
         col.AddChild(new HSeparator());
         // Response length. Off (default) sends maxTokens 0, which the server reads as "dynamic" — stream until the
@@ -100,9 +103,10 @@ public partial class Composer : PanelContainer
         // server clamps that to the loaded model's context, so the spinbox max is just a generous upper bound.
         _capLength = new CheckButton { Text = "Limit response length  (off = until the model stops)" };
         _capLength.AddThemeColorOverride("font_color", Palette.Text);
-        _capLength.Toggled += OnCapToggled;
+        _capLength.Toggled += on => { OnCapToggled(on); SettingsChanged?.Invoke(); };
         col.AddChild(_capLength);
         _maxTokens = Param(col, "Max tokens", 1, 8192, 1, 1024);
+        _maxTokens.ValueChanged += _ => SettingsChanged?.Invoke();
 
         col.AddChild(new HSeparator());
         col.AddChild(Palette.Heading("Web research", 12, Palette.Muted));
@@ -110,16 +114,36 @@ public partial class Composer : PanelContainer
         // returning the sources for citation. Needs TAVILY_API_KEY set on the server, else the turn errors clearly.
         _research = new CheckButton { Text = "🌐  Search the web and answer from current results" };
         _research.AddThemeColorOverride("font_color", Palette.Text);
+        _research.Toggled += _ => SettingsChanged?.Invoke();
         col.AddChild(_research);
 
         col.AddChild(new HSeparator());
         col.AddChild(Palette.Heading("Appearance", 12, Palette.Muted));
-        var fontSize = Param(col, "Text size", 11, 28, 1, Palette.DefaultFontSize); // resizes the conversation text live
-        fontSize.ValueChanged += v => FontSizeChanged?.Invoke((int)v);
+        _fontSize = Param(col, "Text size", 11, 28, 1, Palette.DefaultFontSize); // resizes the conversation text live
+        _fontSize.ValueChanged += v => FontSizeChanged?.Invoke((int)v);
 
         OnSampleToggled(false); // greedy by default → decoding controls start disabled
         OnCapToggled(false);    // dynamic length by default → the cap spinbox starts disabled
     }
+
+    /// <summary>Seeds every popup control from persisted prefs (called once by the host view after construction).
+    /// Values are set directly — the resulting change events just re-persist identical values, which is harmless.</summary>
+    public void ApplyPrefs(ClientPrefs p)
+    {
+        _sample.SetPressedNoSignal(p.Sample);
+        OnSampleToggled(p.Sample);
+        _temperature.Value = p.Temperature;
+        _topK.Value = p.TopK;
+        _topP.Value = p.TopP;
+        _capLength.SetPressedNoSignal(p.MaxTokens > 0);
+        OnCapToggled(p.MaxTokens > 0);
+        if (p.MaxTokens > 0) _maxTokens.Value = p.MaxTokens;
+        _research.SetPressedNoSignal(p.Research);
+        _fontSize.Value = p.FontSize;
+    }
+
+    /// <summary>The current popup settings as a request with an empty prompt — what the host persists to prefs.</summary>
+    public GenerateRequest Snapshot() => BuildRequest("");
 
     public void SetBusy(bool busy)
     {
@@ -208,18 +232,20 @@ public partial class Composer : PanelContainer
     private void Submit()
     {
         if (_busy || string.IsNullOrWhiteSpace(_prompt.Text)) return;
-        Submitted?.Invoke(new GenerateRequest(
-            _prompt.Text,
-            SelectedModel(),
-            _backend.SelectedId,
-            _sample.ButtonPressed,
-            (float)_temperature.Value,
-            (int)_topK.Value,
-            (float)_topP.Value,
-            _capLength.ButtonPressed ? (int)_maxTokens.Value : 0, // 0 = dynamic (until the model stops / context fills)
-            _research.ButtonPressed));
+        Submitted?.Invoke(BuildRequest(_prompt.Text));
         _prompt.Text = ""; // clear the input for the next message (the request already captured the text)
     }
+
+    private GenerateRequest BuildRequest(string prompt) => new(
+        prompt,
+        SelectedModel(),
+        _backend.SelectedId,
+        _sample.ButtonPressed,
+        (float)_temperature.Value,
+        (int)_topK.Value,
+        (float)_topP.Value,
+        _capLength.ButtonPressed ? (int)_maxTokens.Value : 0, // 0 = dynamic (until the model stops / context fills)
+        _research.ButtonPressed);
 
     // A labelled spinbox row for the vertical popup layout: caption on the left, control on the right.
     private static SpinBox Param(VBoxContainer col, string label, double min, double max, double step, double value)

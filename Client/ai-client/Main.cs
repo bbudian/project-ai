@@ -9,6 +9,7 @@ public partial class Main : Control
 {
     private IApiClient _api;
     private AppState _state;
+    private Godot.Timer _prefsSaveTimer;
 
     public override void _Ready()
     {
@@ -16,8 +17,14 @@ public partial class Main : Control
         AddChild(apiNode);
         _api = apiNode;
 
-        _state = new AppState();
+        _state = new AppState(PrefsStore.Load()); // prefs first, so every view seeds from them
         _api.BaseUrl = _state.ServerUrl;
+
+        // Persist preference edits debounced, so typing in the URL field doesn't write a file per keystroke.
+        _prefsSaveTimer = new Godot.Timer { WaitTime = 0.75, OneShot = true };
+        _prefsSaveTimer.Timeout += () => PrefsStore.Save(_state.Prefs);
+        AddChild(_prefsSaveTimer);
+        _state.PrefsChanged += () => { _prefsSaveTimer.Stop(); _prefsSaveTimer.Start(); };
 
         // API results flow into the store; views subscribe to the store, never to each other.
         _api.HealthReceived += health => _state.SetHealth(health);
@@ -27,6 +34,12 @@ public partial class Main : Control
         BuildShell();
 
         _api.CheckHealth(); // attempt to connect + populate the model/backend pickers on launch
+    }
+
+    public override void _Notification(int what)
+    {
+        // Flush a pending debounced save on app close so the last edit isn't lost.
+        if (what == NotificationWMCloseRequest && _state != null) PrefsStore.Save(_state.Prefs);
     }
 
     private void BuildShell()
@@ -60,6 +73,7 @@ public partial class Main : Control
 
         rail.Navigated += host.Show;
         host.Shown += rail.SetActive;
-        host.Show(ViewIds.Chat);
+        host.Shown += id => _state.MutatePrefs(p => p.LastView = id); // reopen where the user left off
+        host.Show(host.Has(_state.Prefs.LastView) ? _state.Prefs.LastView : ViewIds.Chat);
     }
 }

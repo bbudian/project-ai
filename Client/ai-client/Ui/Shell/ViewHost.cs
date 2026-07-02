@@ -19,6 +19,8 @@ public partial class ViewHost : VBoxContainer
         AddThemeConstantOverride("separation", 0);
     }
 
+    public bool Has(string id) => _views.ContainsKey(id);
+
     public void Register(string id, IView view)
     {
         _views[id] = view;

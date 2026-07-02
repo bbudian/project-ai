@@ -6,10 +6,19 @@ using System;
 // eventing paradigm for state; Godot signals stay for UI controls. Passed by constructor, never an autoload.
 public sealed class AppState
 {
+    public AppState(ClientPrefs prefs)
+    {
+        Prefs = prefs;
+        ServerUrl = prefs.ServerUrl;
+    }
+
+    /// <summary>Client-local preferences (persisted by Main on PrefsChanged). Mutate only via <see cref="MutatePrefs"/>.</summary>
+    public ClientPrefs Prefs { get; }
+
     /// <summary>Latest /health result (null until the first response). Views must check <c>Ok</c> before reading.</summary>
     public HealthResult Health { get; private set; }
 
-    public string ServerUrl { get; private set; } = "http://localhost:8080";
+    public string ServerUrl { get; private set; }
 
     /// <summary>The model/backend the user last chose in the chat composer — lets a future Models view preselect.</summary>
     public string SelectedModel { get; private set; } = "";
@@ -22,6 +31,7 @@ public sealed class AppState
     public event Action ServerUrlChanged;
     public event Action SelectionChanged;
     public event Action JobsChanged;
+    public event Action PrefsChanged;
 
     public void SetHealth(HealthResult health)
     {
@@ -33,7 +43,9 @@ public sealed class AppState
     {
         if (url == ServerUrl) return;
         ServerUrl = url;
+        Prefs.ServerUrl = url;
         ServerUrlChanged?.Invoke();
+        PrefsChanged?.Invoke();
     }
 
     public void SetSelection(string model, string backend)
@@ -41,7 +53,18 @@ public sealed class AppState
         if (model == SelectedModel && backend == SelectedBackend) return;
         SelectedModel = model;
         SelectedBackend = backend;
+        // The last choice becomes this machine's default, so the pickers come back the same way next launch.
+        Prefs.DefaultModel = model;
+        Prefs.DefaultBackend = backend;
         SelectionChanged?.Invoke();
+        PrefsChanged?.Invoke();
+    }
+
+    /// <summary>Applies a preference edit and notifies (Main persists on PrefsChanged, debounced).</summary>
+    public void MutatePrefs(Action<ClientPrefs> mutate)
+    {
+        mutate(Prefs);
+        PrefsChanged?.Invoke();
     }
 
     public void SetTrainStatus(TrainStatus status)

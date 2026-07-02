@@ -56,10 +56,18 @@ public partial class ChatView : HBoxContainer, IView
 
         _composer.Submitted += OnSubmit;
         _composer.Canceled += OnCancel;
-        _composer.FontSizeChanged += size => _transcript.SetFontSize(size);
+        _composer.FontSizeChanged += size =>
+        {
+            _transcript.SetFontSize(size);
+            _state.MutatePrefs(p => p.FontSize = size);
+        };
+        _composer.SettingsChanged += PersistComposerSettings;
 
         _recents.NewChatRequested += OnNewChat;
         _recents.RecentSelected += prompt => _composer.SetPrompt(prompt);
+
+        _composer.ApplyPrefs(_state.Prefs);
+        _transcript.SetFontSize(_state.Prefs.FontSize);
 
         _state.HealthChanged += OnHealth;
         OnHealth(); // render whatever state already exists — a view registered after the first /health must not start empty
@@ -68,8 +76,31 @@ public partial class ChatView : HBoxContainer, IView
     private void OnHealth()
     {
         if (_state.Health is not { Ok: true } health) return;
-        _composer.SetModels(health.Models, health.Default);
-        _composer.SetBackends(health.Backends, health.DefaultBackend);
+        // Prefer this machine's remembered model/backend when the server still offers them, else the server default.
+        string preferredModel = System.Array.IndexOf(health.Models, _state.Prefs.DefaultModel) >= 0
+            ? _state.Prefs.DefaultModel : health.Default;
+        string preferredBackend = health.DefaultBackend;
+        foreach (var b in health.Backends)
+            if (b.Id == _state.Prefs.DefaultBackend && b.Available) { preferredBackend = b.Id; break; }
+        _composer.SetModels(health.Models, preferredModel);
+        _composer.SetBackends(health.Backends, preferredBackend);
+    }
+
+    // Any popup change (model, backend, sampling, length, research) becomes this machine's new default.
+    private void PersistComposerSettings()
+    {
+        var s = _composer.Snapshot();
+        _state.MutatePrefs(p =>
+        {
+            p.DefaultModel = s.Model;
+            p.DefaultBackend = s.Backend;
+            p.Sample = s.Sample;
+            p.Temperature = s.Temperature;
+            p.TopK = s.TopK;
+            p.TopP = s.TopP;
+            p.MaxTokens = s.MaxTokens;
+            p.Research = s.Research;
+        });
     }
 
     private void OnSubmit(GenerateRequest request)
