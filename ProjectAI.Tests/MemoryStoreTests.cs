@@ -182,4 +182,21 @@ public class MemoryStoreTests
         Assert.Null(n.Open("x"));
         Assert.Throws<InvalidOperationException>(() => n.Encode(new MemoryDraft("t", ["k"], "b")));
     }
+
+    // Recall must be silent when nothing relevant exists: an unrelated (or content-free) message must not inject
+    // the globally top-ranked memories — irrelevant context measurably hurts small models. Browsing ("" query)
+    // stays a full-catalog scan.
+    [Fact]
+    public void RenderRecall_Unrelated_Or_Keyless_Query_Injects_Nothing()
+    {
+        using var t = new TempStore();
+        t.Store.Encode(new MemoryDraft(
+            "GPU batch size", ["gpu", "batch"], "Use batch 16 on the 8GB card.", Trust: MemoryTrust.Curated));
+
+        Assert.Equal("", t.Store.RenderRecall("tell me a story about pirates", 3, 400)); // no key overlap
+        Assert.Equal("", t.Store.RenderRecall("??? !!!", 3, 400));                       // content-free
+        Assert.Empty(t.Store.Search("pirates story", 5));                                // keyed miss → empty, no fallback
+        Assert.NotEmpty(t.Store.Search("", 5));                                          // catalog listing still works
+        Assert.NotEqual("", t.Store.RenderRecall("what gpu batch size?", 3, 400));       // real overlap still recalls
+    }
 }

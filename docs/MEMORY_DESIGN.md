@@ -389,7 +389,7 @@ Extend the `Meta` record (verified: `record Meta(ModelConfig, string TokenizerKi
 - **M1 — Stage-1 mid-decode RECALL/ENCODE + control-line suppression + recall budget.** `MemoryInterceptor`, the one branch in both decode loops, `Forward`-re-feed. **~1.5 days.**
 - **M2 — Write hygiene + janitor (§6).** Conflict resolution/tombstones, staleness/`asof` verification, dead-link + duplicate GC, `Consolidate`/`Reindex`, `trust` gating on injection. **~2 days.**
 - **M3 — COMPACTION.** Watermark, out-of-band distill, `Reset`+re-prefill rebuild, link-and-keep source. **~2 days.**
-- **M4 — Godot client Memory panel** (list/search/toggle, mirroring the web-search toggle) + `Checkpointing.Meta` fields. **~2 days.**
+- **M4 — Godot client Memory panel** (list/search/toggle, mirroring the web-search toggle) + `Checkpointing.Meta` fields. **~2 days.** ✅ **Shipped 2026-07-02** (ahead of M1–M3): a composer Memory toggle rides the chat `start` frame; a Memory destination with catalog/search, injection preview, and manual inject over the new endpoints `GET /memory`, `GET /memory/render`, and `PUT /memory` (PUT so browser preflight blocks cross-origin writes). Also fixed en route: `Search` no longer falls back to the whole pool on a keyed miss, and `RenderRecall` is silent for content-free queries — no more irrelevant-context injection.
 - **v2 (separate) — Stage-2 special tokens + fine-tune**, sharing the `Trainer`/`POST /train` path with the reserved lineage loop. Gated on §5 crossover criteria.
 
 No changes below `IComputeBackend`; no tokenizer retrain for M0–M4; no new native dependency.

@@ -39,6 +39,9 @@ public partial class ApiClient : Node, IApiClient
     public event Action<TrainStartResult> TrainStarted;
     public event Action<TrainStatus> TrainStatusReceived;
     public event Action<TokenizeResult> TokenizeReceived;
+    public event Action<MemoryListResult> MemoryListReceived;
+    public event Action<MemoryRenderResult> MemoryRenderReceived;
+    public event Action<MemorySaveResult> MemorySaved;
 
     public override void _Ready()
     {
@@ -77,6 +80,54 @@ public partial class ApiClient : Node, IApiClient
             data => TokenizeReceived?.Invoke(ParseTokenize(data)),
             error => TokenizeReceived?.Invoke(new TokenizeResult(false, model, 0, [], error)),
             Poll: false));
+    }
+
+    // Memory endpoints. The user is always the fixed single-local-user "default" (no user picker by design —
+    // the server's per-user partition is namespacing, not auth; see docs/CLIENT_DESIGN.md security notes).
+    private static string MemoryQuery(string store, string query) =>
+        $"?user=default&store={Uri.EscapeDataString(store ?? "default")}" +
+        (string.IsNullOrEmpty(query) ? "" : $"&q={Uri.EscapeDataString(query)}");
+
+    public void MemoryList(string store, string query) => Send(new Pending(
+        "/memory" + MemoryQuery(store, query), Godot.HttpClient.Method.Get, null,
+        data => MemoryListReceived?.Invoke(ParseMemoryList(data)),
+        error => MemoryListReceived?.Invoke(new MemoryListResult(false, store, 0, [], error)),
+        Poll: false));
+
+    public void MemoryRender(string store, string query) => Send(new Pending(
+        "/memory/render" + MemoryQuery(store, query), Godot.HttpClient.Method.Get, null,
+        data => MemoryRenderReceived?.Invoke(new MemoryRenderResult(true, data.Str("bridge"), data.Str("recall"), null)),
+        error => MemoryRenderReceived?.Invoke(new MemoryRenderResult(false, "", "", error)),
+        Poll: false));
+
+    public void MemoryPut(string store, string title, string[] keys, string body, string tier, string trust)
+    {
+        var keysArr = new Godot.Collections.Array();
+        foreach (var k in keys) keysArr.Add(k);
+        var payload = new Godot.Collections.Dictionary
+        {
+            { "title", title }, { "keys", keysArr }, { "body", body },
+            { "tier", tier }, { "trust", trust }, { "user", "default" }, { "store", store ?? "default" },
+        };
+        Send(new Pending("/memory", Godot.HttpClient.Method.Put, Json.Stringify(payload),
+            data => MemorySaved?.Invoke(new MemorySaveResult(true, data.Str("id"), null)),
+            error => MemorySaved?.Invoke(new MemorySaveResult(false, "", error)),
+            Poll: false));
+    }
+
+    private static MemoryListResult ParseMemoryList(Godot.Collections.Dictionary data)
+    {
+        var arr = data.Arr("memories");
+        var cards = new MemoryCardInfo[arr.Count];
+        for (int i = 0; i < cards.Length; i++)
+        {
+            var m = arr[i].AsGodotDictionary();
+            var keysArr = m.Arr("keys");
+            var keys = new string[keysArr.Count];
+            for (int k = 0; k < keys.Length; k++) keys[k] = keysArr[k].AsString();
+            cards[i] = new MemoryCardInfo(m.Str("id"), m.Str("title"), keys, m.Str("tier"), m.Str("trust"), m.Str("asof"));
+        }
+        return new MemoryListResult(true, data.Str("store"), data.Int("count"), cards, null);
     }
 
     public void StartTraining(TrainRequest request)

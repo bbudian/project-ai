@@ -140,6 +140,14 @@ internal static class Server
                 return;
             }
 
+            // ---- memory (M0): catalog + injection preview + manual inject -------------------------------------
+            if (req.HttpMethod == "GET" && path == "/memory") { HandleMemoryList(req, res); return; }
+            if (req.HttpMethod == "GET" && path == "/memory/render") { HandleMemoryRender(req, res); return; }
+            // PUT (not POST) deliberately: browsers preflight cross-origin PUTs, and this server's CORS preflight
+            // only allows GET/POST — so a drive-by web page cannot write memories through the user's browser.
+            // Non-browser clients (the Godot app, curl) are unaffected.
+            if (req.HttpMethod == "PUT" && path == "/memory") { HandleMemoryPut(req, res); return; }
+
             if (req.HttpMethod == "GET" && path == "/train/status")
             {
                 WriteJson(res, 200, new { training = TrainStatus(training) });
@@ -176,6 +184,97 @@ internal static class Server
     // Serializes the actual model forward pass: the model/backend (KV cache, libtorch DisposeScopes) is not
     // thread-safe, so only one generation runs at a time even though requests are now handled on multiple threads.
     private static readonly object InferenceLock = new();
+
+    // ---- memory endpoints (M0 read/list + manual inject) -----------------------------------------------------
+    // All go through MemoryStoreRegistry.Resolve, which keeps the traversal protection; user/store default to the
+    // "default" partition. None of these take the InferenceLock — pure file/index work never blocks generation.
+
+    private static IMemoryStore ResolveMemory(HttpListenerRequest req, out string user, out string store)
+    {
+        user = req.QueryString["user"] ?? "default";
+        store = req.QueryString["store"] ?? "default";
+        return _memory!.Resolve(user, store);
+    }
+
+    /// <summary>GET /memory?user=&amp;store=&amp;q= — the card-level catalog (never bodies; Open would bump the
+    /// uses counter). Empty q lists everything; a non-empty q filters by the same lexical search recall uses.</summary>
+    private static void HandleMemoryList(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        var store = ResolveMemory(req, out string user, out string storeId);
+        if (!store.IsConfigured) { WriteJson(res, 400, new { error = store.Unavailable ?? "invalid user/store name" }); return; }
+        string q = req.QueryString["q"] ?? "";
+        var hits = store.Search(q, 200);
+        WriteJson(res, 200, new
+        {
+            user,
+            store = storeId,
+            count = store.Count,
+            memories = hits.Select(h => new
+            {
+                id = h.Id, title = h.Title, keys = h.Keys, tier = h.Tier, trust = h.Trust,
+                score = h.Score, asof = h.AsOf,
+            }),
+        });
+    }
+
+    /// <summary>GET /memory/render?user=&amp;store=&amp;q= — exactly what would be injected for a message: the pinned
+    /// bridge and (for a non-empty q) the Stage-0 recall block, rendered with the same budgets the chat path uses.</summary>
+    private static void HandleMemoryRender(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        var store = ResolveMemory(req, out string user, out string storeId);
+        if (!store.IsConfigured) { WriteJson(res, 400, new { error = store.Unavailable ?? "invalid user/store name" }); return; }
+        string q = req.QueryString["q"] ?? "";
+        WriteJson(res, 200, new
+        {
+            user,
+            store = storeId,
+            bridge = store.RenderBridge(MemoryPolicy.BridgeCards, MemoryPolicy.BridgeBudget),
+            recall = string.IsNullOrEmpty(q) ? "" : store.RenderRecall(q, MemoryPolicy.RecallHits, MemoryPolicy.RecallBudget),
+        });
+    }
+
+    private sealed record MemoryPutRequest(
+        string? Title, string[]? Keys, string? Body, string? Tier, string? Trust, string? User, string? Store);
+
+    /// <summary>PUT /memory — manual inject (the write path's first real caller). Tier/trust are validated against
+    /// the known sets; the reserved "inherited" tier is rejected (lineage-only).</summary>
+    private static void HandleMemoryPut(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        const int maxBody = 64 << 10; // 64 KiB — a memory is a note, not a document
+        if (req.ContentLength64 > maxBody) { WriteJson(res, 413, new { error = "request body too large" }); return; }
+        string body;
+        using (var reader = new StreamReader(req.InputStream, req.ContentEncoding))
+        {
+            var buffer = new char[maxBody + 1];
+            int read = reader.ReadBlock(buffer, 0, buffer.Length);
+            if (read > maxBody) { WriteJson(res, 413, new { error = "request body too large" }); return; }
+            body = new string(buffer, 0, read);
+        }
+
+        MemoryPutRequest? mr;
+        try { mr = JsonSerializer.Deserialize<MemoryPutRequest>(body, JsonOpts); }
+        catch (JsonException) { WriteJson(res, 400, new { error = "invalid JSON body" }); return; }
+        if (mr is null || (string.IsNullOrWhiteSpace(mr.Title) && string.IsNullOrWhiteSpace(mr.Body)))
+        { WriteJson(res, 400, new { error = "a memory needs a 'title' or a 'body'" }); return; }
+
+        string tier = string.IsNullOrEmpty(mr.Tier) ? MemoryTiers.Long : mr.Tier;
+        string trust = string.IsNullOrEmpty(mr.Trust) ? MemoryTrust.Chat : mr.Trust;
+        if (!MemoryTiers.IsKnown(tier) || tier == MemoryTiers.Inherited)
+        { WriteJson(res, 400, new { error = "tier must be one of: core, long, session" }); return; }
+        if (!MemoryTrust.IsKnown(trust))
+        { WriteJson(res, 400, new { error = "trust must be one of: curated, chat, untrusted" }); return; }
+
+        var store = _memory!.Resolve(mr.User ?? "default", mr.Store ?? "default");
+        if (!store.IsConfigured) { WriteJson(res, 400, new { error = store.Unavailable ?? "invalid user/store name" }); return; }
+
+        try
+        {
+            string id = store.Encode(new MemoryDraft(
+                mr.Title ?? "", mr.Keys ?? [], mr.Body ?? "", Tier: tier, Trust: trust, Source: "api"));
+            WriteJson(res, 200, new { id });
+        }
+        catch (ArgumentException e) { WriteJson(res, 400, new { error = e.Message }); }
+    }
 
     private static void HandleGenerate(
         HttpListenerRequest req, HttpListenerResponse res, ComputeRegistry compute, string defaultModel)

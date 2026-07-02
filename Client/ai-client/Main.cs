@@ -68,8 +68,10 @@ public partial class Main : Control
 
         host.Register(ViewIds.Chat, new ChatView(_state));
         host.Register(ViewIds.Models, new ModelsView(_state, _api));
+        host.Register(ViewIds.Memory, new MemoryView(_state, _api)); // live now that the server ships /memory reads
         rail.AddDestination(ViewIds.Chat, "💬   Chat");
         rail.AddDestination(ViewIds.Models, "◫   Models");
+        rail.AddDestination(ViewIds.Memory, "🧠   Memory");
 
         rail.Navigated += host.Show;
         _state.NavigateRequested += host.Show; // cross-view jumps (e.g. a model card's "Chat with")

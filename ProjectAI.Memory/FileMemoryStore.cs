@@ -95,10 +95,20 @@ public sealed class FileMemoryStore : IMemoryStore
             foreach (var key in queryKeys)
                 if (_postings.TryGetValue(key, out var ids))
                     foreach (var id in ids) candidates.Add(id);
-            // Small-store fallback: with no posting hit, consider everything (cheap while tiny; posting hits carry scale).
-            IEnumerable<MemoryNode> pool = candidates.Count > 0
-                ? candidates.Where(_nodes.ContainsKey).Select(id => _nodes[id])
-                : _nodes.Values;
+            // A keyed query with zero posting hits means nothing relevant exists — return empty rather than falling
+            // back to globally top-ranked (but unrelated) memories: injecting irrelevant context measurably hurts
+            // small models, the opposite of recall's purpose. A keyless query ("" — the catalog/browse case) is an
+            // explicit "list everything" and scans the whole pool.
+            IEnumerable<MemoryNode> pool;
+            if (queryKeys.Count > 0)
+            {
+                if (candidates.Count == 0) return [];
+                pool = candidates.Where(_nodes.ContainsKey).Select(id => _nodes[id]);
+            }
+            else
+            {
+                pool = _nodes.Values;
+            }
 
             return pool
                 .Where(n => n.Tier != MemoryTiers.Inherited)
@@ -175,6 +185,9 @@ public sealed class FileMemoryStore : IMemoryStore
     public string RenderRecall(string query, int maxHits, int tokenBudget)
     {
         if (maxHits <= 0 || tokenBudget <= 0) return "";
+        // A content-free message (all stopwords/punctuation) recalls nothing — without this, the keyless query
+        // would fall into Search's catalog path and inject the globally top-ranked memories on every such turn.
+        if (MemoryText.NormalizeKeys(query).Count == 0) return "";
         // Search wider, then keep only trusted memories (untrusted is never auto-recalled), best first.
         var hits = Search(query, maxHits * 3).Where(h => h.Trust != MemoryTrust.Untrusted).Take(maxHits).ToList();
         if (hits.Count == 0) return "";

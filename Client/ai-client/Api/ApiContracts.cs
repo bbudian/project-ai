@@ -11,10 +11,16 @@ public interface IApiClient
     void StartTraining(TrainRequest request);
     void CheckTrainStatus();
     void Tokenize(string model, string text);
+    void MemoryList(string store, string query);
+    void MemoryRender(string store, string query);
+    void MemoryPut(string store, string title, string[] keys, string body, string tier, string trust);
     event Action<HealthResult> HealthReceived;
     event Action<TrainStartResult> TrainStarted;
     event Action<TrainStatus> TrainStatusReceived;
     event Action<TokenizeResult> TokenizeReceived;
+    event Action<MemoryListResult> MemoryListReceived;
+    event Action<MemoryRenderResult> MemoryRenderReceived;
+    event Action<MemorySaveResult> MemorySaved;
 }
 
 /// <summary>One generation request: the prompt, the chosen model and compute backend (empty = server default), decoding settings, whether to ground the answer in a live web search (RAG), and whether to attach the server-side memory store (session-scoped — honored on the chat start frame). Carried over the chat WebSocket (the old REST /generate result type was retired in favor of streaming).</summary>
@@ -43,6 +49,18 @@ public sealed record HealthResult(bool Ok, string[] Models, ModelInfo[] Infos, s
 
 /// <summary>Result of a /tokenize probe: how the named model's tokenizer splits a text.</summary>
 public sealed record TokenizeResult(bool Ok, string Model, int Count, string[] Pieces, string Error);
+
+/// <summary>One card of the memory catalog (GET /memory): identity + ranking frontmatter, never the body.</summary>
+public sealed record MemoryCardInfo(string Id, string Title, string[] Keys, string Tier, string Trust, string AsOf);
+
+/// <summary>The memory catalog for a store. <see cref="Count"/> is the store's total; <see cref="Memories"/> is the (possibly query-filtered) listing.</summary>
+public sealed record MemoryListResult(bool Ok, string Store, int Count, MemoryCardInfo[] Memories, string Error);
+
+/// <summary>What would be injected for a message (GET /memory/render): the pinned bridge and the recall block for the query.</summary>
+public sealed record MemoryRenderResult(bool Ok, string Bridge, string Recall, string Error);
+
+/// <summary>Result of a manual memory inject (PUT /memory).</summary>
+public sealed record MemorySaveResult(bool Ok, string Id, string Error);
 
 /// <summary>A request to train a new model on the server: a name, the training text, a size preset, step count, and compute backend.</summary>
 public sealed record TrainRequest(string Name, string Text, string Size, int Steps, string Backend);
