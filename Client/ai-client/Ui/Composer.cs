@@ -194,6 +194,19 @@ public partial class Composer : PanelContainer
 
     private string SelectedModel() => _model is { Selected: >= 0 } ? _model.GetItemText(_model.Selected) : "";
 
+    /// <summary>Programmatically selects a model (e.g. a model card's "Chat with"). No SettingsChanged is raised —
+    /// the caller already updated the shared selection state.</summary>
+    public void SelectModel(string name)
+    {
+        for (int i = 0; i < _model.ItemCount; i++)
+            if (_model.GetItemText(i) == name)
+            {
+                _model.Selected = i;
+                UpdateSettingsButton();
+                return;
+            }
+    }
+
     /// <summary>Populates the backend picker (shared <see cref="BackendPicker"/> logic), then refreshes the trigger label.</summary>
     public void SetBackends(BackendOption[] backends, string defaultId)
     {

@@ -31,6 +31,9 @@ internal sealed class ComputeRegistry : IDisposable
     /// <summary>The available model names (backend-agnostic — just a directory scan via the default registry).</summary>
     public IReadOnlyList<string> ListModels() => Resolve(DefaultId).Models.List();
 
+    /// <summary>The enriched model catalog (metadata-only reads; per-file failures degrade gracefully).</summary>
+    public IReadOnlyList<ModelInfo> ListModelInfos() => Resolve(DefaultId).Models.ListInfos();
+
     /// <summary>
     /// Resolves the (backend, models) pair for an id, creating + caching the backend on first use.
     /// Throws if the id is unknown or the backend can't start on this machine.

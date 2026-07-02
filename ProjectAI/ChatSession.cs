@@ -59,7 +59,7 @@ internal sealed class ChatSession
 
     /// <summary>
     /// Ingests <paramref name="userText"/> into the warm cache, then streams the assistant reply through
-    /// <paramref name="onDelta"/> (decoded text, UTF-8-boundary-safe). Stops on EOS / <|im_end|>, the token budget,
+    /// <paramref name="onDelta"/> (decoded text, UTF-8-boundary-safe). Stops on EOS / <c>&lt;|im_end|&gt;</c>, the token budget,
     /// the context limit, or when <paramref name="cancel"/> is signalled (checked once per generated token →
     /// StopReason "canceled"). Returns per-turn diagnostics.
     /// </summary>

@@ -10,9 +10,11 @@ public interface IApiClient
     void CheckHealth();
     void StartTraining(TrainRequest request);
     void CheckTrainStatus();
+    void Tokenize(string model, string text);
     event Action<HealthResult> HealthReceived;
     event Action<TrainStartResult> TrainStarted;
     event Action<TrainStatus> TrainStatusReceived;
+    event Action<TokenizeResult> TokenizeReceived;
 }
 
 /// <summary>One generation request: the prompt, the chosen model and compute backend (empty = server default), decoding settings, whether to ground the answer in a live web search (RAG), and whether to attach the server-side memory store (session-scoped — honored on the chat start frame). Carried over the chat WebSocket (the old REST /generate result type was retired in favor of streaming).</summary>
@@ -33,8 +35,14 @@ public sealed record BackendOption(string Id, string Label, bool Available, stri
 /// <summary>A training size preset the server offers (the Train-tab size picker): an id sent with the request and a human-readable label.</summary>
 public sealed record SizeOption(string Id, string Label);
 
+/// <summary>One entry of the server's enriched model catalog (/health <c>modelInfos</c>). <see cref="Error"/> is set (and the numbers zero) when the server couldn't read that checkpoint's metadata; a name-only fallback is synthesized when talking to an older server without <c>modelInfos</c>.</summary>
+public sealed record ModelInfo(string Name, long Params, int Layers, int Ctx, int Vocab, string Tokenizer, string Dtype, int Step, bool Instruct, long FileBytes, string Error);
+
 /// <summary>Result of a /health call: the available models, backends, training-size presets, and the server's defaults. On failure, only <see cref="Error"/> is meaningful.</summary>
-public sealed record HealthResult(bool Ok, string[] Models, string Default, BackendOption[] Backends, string DefaultBackend, SizeOption[] Sizes, string Error);
+public sealed record HealthResult(bool Ok, string[] Models, ModelInfo[] Infos, string Default, BackendOption[] Backends, string DefaultBackend, SizeOption[] Sizes, string Error);
+
+/// <summary>Result of a /tokenize probe: how the named model's tokenizer splits a text.</summary>
+public sealed record TokenizeResult(bool Ok, string Model, int Count, string[] Pieces, string Error);
 
 /// <summary>A request to train a new model on the server: a name, the training text, a size preset, step count, and compute backend.</summary>
 public sealed record TrainRequest(string Name, string Text, string Size, int Steps, string Backend);

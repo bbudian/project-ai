@@ -59,6 +59,25 @@ public static class Checkpointing
     }
 
     /// <summary>
+    /// Everything a catalog needs to describe a checkpoint without loading weights — config, tokenizer kind,
+    /// precision, saved step — read from the metadata header only (cheap even for multi-GB files).
+    /// </summary>
+    public sealed record CheckpointInfo(ModelConfig Config, string TokenizerKind, DType ComputeDType, int Step);
+
+    /// <summary>Reads a checkpoint's descriptive metadata without touching the weight payload. Throws on a
+    /// metadata-less (resume-only) checkpoint, same as <see cref="LoadModel"/> would.</summary>
+    public static CheckpointInfo PeekInfo(string path)
+    {
+        var (step, metadataJson) = Checkpoint.ReadMetadata(path);
+        if (string.IsNullOrEmpty(metadataJson))
+            throw new InvalidDataException($"checkpoint '{path}' has no model metadata; it cannot be described (was it saved by `train`?).");
+        var meta = JsonSerializer.Deserialize<Meta>(metadataJson)
+            ?? throw new InvalidDataException($"checkpoint '{path}' has unreadable model metadata.");
+        string kind = string.IsNullOrEmpty(meta.TokenizerKind) ? "bpe" : meta.TokenizerKind; // pre-tag files are BPE
+        return new CheckpointInfo(meta.Config, kind, meta.ComputeDType, step);
+    }
+
+    /// <summary>
     /// Reconstructs ONLY the tokenizer from a checkpoint's metadata — no weights are read, so this is cheap even
     /// for multi-GB models. Used by the <c>tokenize</c> command / <c>/tokenize</c> endpoint to inspect tokenization.
     /// </summary>

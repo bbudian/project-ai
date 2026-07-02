@@ -72,6 +72,7 @@ public partial class Main : Control
         rail.AddDestination(ViewIds.Models, "◫   Models");
 
         rail.Navigated += host.Show;
+        _state.NavigateRequested += host.Show; // cross-view jumps (e.g. a model card's "Chat with")
         host.Shown += rail.SetActive;
         host.Shown += id => _state.MutatePrefs(p => p.LastView = id); // reopen where the user left off
         host.Show(host.Has(_state.Prefs.LastView) ? _state.Prefs.LastView : ViewIds.Chat);

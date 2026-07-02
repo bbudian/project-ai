@@ -116,7 +116,21 @@ internal static class Server
                 WriteJson(res, 200, new
                 {
                     status = "ok",
-                    models = compute.ListModels(),
+                    models = compute.ListModels(), // names only — kept for back-compat with older clients
+                    modelInfos = compute.ListModelInfos().Select(m => new
+                    {
+                        name = m.Name,
+                        @params = m.Params,
+                        layers = m.Layers,
+                        ctx = m.Ctx,
+                        vocab = m.Vocab,
+                        tokenizer = m.TokenizerKind,
+                        dtype = m.Dtype,
+                        step = m.Step,
+                        instruct = m.Instruct,
+                        fileBytes = m.FileBytes,
+                        error = m.Error,
+                    }),
                     @default = defaultModel,
                     backends = compute.AvailableBackends.Select(b => new { id = b.Id, label = b.Label, available = b.Available, reason = b.Reason }),
                     defaultBackend = compute.DefaultId,

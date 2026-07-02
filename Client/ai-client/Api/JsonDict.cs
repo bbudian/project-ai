@@ -13,6 +13,9 @@ public static class JsonDict
     public static int Int(this Godot.Collections.Dictionary d, string key, int fallback = 0) =>
         d.ContainsKey(key) && d[key].VariantType is Variant.Type.Int or Variant.Type.Float ? d[key].AsInt32() : fallback;
 
+    public static long Long(this Godot.Collections.Dictionary d, string key, long fallback = 0) =>
+        d.ContainsKey(key) && d[key].VariantType is Variant.Type.Int or Variant.Type.Float ? d[key].AsInt64() : fallback;
+
     public static float Float(this Godot.Collections.Dictionary d, string key, float fallback = 0f) =>
         d.ContainsKey(key) && d[key].VariantType is Variant.Type.Float or Variant.Type.Int ? (float)d[key].AsDouble() : fallback;
 

@@ -38,6 +38,7 @@ public partial class ApiClient : Node, IApiClient
     public event Action<HealthResult> HealthReceived;
     public event Action<TrainStartResult> TrainStarted;
     public event Action<TrainStatus> TrainStatusReceived;
+    public event Action<TokenizeResult> TokenizeReceived;
 
     public override void _Ready()
     {
@@ -64,7 +65,17 @@ public partial class ApiClient : Node, IApiClient
         Send(new Pending(
             "/health", Godot.HttpClient.Method.Get, null,
             data => { if (seq == _healthSeq) HealthReceived?.Invoke(ParseHealth(data)); },
-            error => { if (seq == _healthSeq) HealthReceived?.Invoke(new HealthResult(false, [], "", [], "", [], error)); },
+            error => { if (seq == _healthSeq) HealthReceived?.Invoke(new HealthResult(false, [], [], "", [], "", [], error)); },
+            Poll: false));
+    }
+
+    public void Tokenize(string model, string text)
+    {
+        var body = new Godot.Collections.Dictionary { { "text", text } };
+        if (!string.IsNullOrEmpty(model)) body["model"] = model;
+        Send(new Pending("/tokenize", Godot.HttpClient.Method.Post, Json.Stringify(body),
+            data => TokenizeReceived?.Invoke(ParseTokenize(data)),
+            error => TokenizeReceived?.Invoke(new TokenizeResult(false, model, 0, [], error)),
             Poll: false));
     }
 
@@ -176,7 +187,38 @@ public partial class ApiClient : Node, IApiClient
             sizes[i] = new SizeOption(s.Str("id"), s.Str("label"));
         }
 
-        return new HealthResult(true, names, data.Str("default"), backends, data.Str("defaultBackend"), sizes, null);
+        // Enriched catalog when the server provides it; otherwise synthesize name-only entries (older server).
+        ModelInfo[] infos;
+        if (data.ContainsKey("modelInfos"))
+        {
+            var infosArr = data.Arr("modelInfos");
+            infos = new ModelInfo[infosArr.Count];
+            for (int i = 0; i < infos.Length; i++)
+            {
+                var m = infosArr[i].AsGodotDictionary();
+                infos[i] = new ModelInfo(
+                    m.Str("name"), m.Long("params"), m.Int("layers"), m.Int("ctx"), m.Int("vocab"),
+                    m.Str("tokenizer"), m.Str("dtype"), m.Int("step"), m.Bool("instruct"),
+                    m.Long("fileBytes"), m.Str("error", null));
+            }
+        }
+        else
+        {
+            infos = new ModelInfo[names.Length];
+            for (int i = 0; i < names.Length; i++)
+                infos[i] = new ModelInfo(names[i], 0, 0, 0, 0, "", "", 0, false, 0, null);
+        }
+
+        return new HealthResult(true, names, infos, data.Str("default"), backends, data.Str("defaultBackend"), sizes, null);
+    }
+
+    private static TokenizeResult ParseTokenize(Godot.Collections.Dictionary data)
+    {
+        var tokensArr = data.Arr("tokens");
+        var pieces = new string[tokensArr.Count];
+        for (int i = 0; i < pieces.Length; i++)
+            pieces[i] = tokensArr[i].AsGodotDictionary().Str("text");
+        return new TokenizeResult(true, data.Str("model"), data.Int("count"), pieces, null);
     }
 
     private static TrainStatus ParseTrainStatus(Godot.Collections.Dictionary data)

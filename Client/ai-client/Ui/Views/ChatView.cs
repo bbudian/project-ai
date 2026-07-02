@@ -85,6 +85,11 @@ public partial class ChatView : HBoxContainer, IView
         _transcript.SetFontSize(_state.Prefs.FontSize);
 
         _state.HealthChanged += OnHealth;
+        // Another view chose a model (e.g. "Chat with" on a card) — reflect it in the picker.
+        _state.SelectionChanged += () =>
+        {
+            if (!string.IsNullOrEmpty(_state.SelectedModel)) _composer.SelectModel(_state.SelectedModel);
+        };
         OnHealth(); // render whatever state already exists — a view registered after the first /health must not start empty
     }
 

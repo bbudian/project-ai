@@ -38,6 +38,69 @@ internal sealed class ModelRegistry
             .ToList();
     }
 
+    // Descriptive info cache keyed by path; invalidated when the file changes (retrain writes a new mtime/length).
+    private readonly Dictionary<string, ((DateTime Mtime, long Length) Fingerprint, ModelInfo Info)> _infos =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _infoLock = new();
+
+    /// <summary>
+    /// The model catalog with metadata read from each checkpoint's header (no weights loaded): parameter count,
+    /// layers, context, tokenizer kind, precision, step, and whether it's a chat-templated (instruct) model.
+    /// Per-file failures degrade to a name-plus-error entry — /health must never fail because one file is bad.
+    /// </summary>
+    public IReadOnlyList<ModelInfo> ListInfos()
+    {
+        if (!Directory.Exists(_directory)) return [];
+        var infos = new List<ModelInfo>();
+        foreach (string path in Directory.GetFiles(_directory, "*.ckpt").OrderBy(p => p, StringComparer.Ordinal))
+        {
+            string name = Path.GetFileNameWithoutExtension(path);
+            if (string.IsNullOrEmpty(name)) continue;
+            var file = new FileInfo(path);
+            var fingerprint = (file.LastWriteTimeUtc, file.Length);
+            lock (_infoLock)
+                if (_infos.TryGetValue(path, out var hit) && hit.Fingerprint == fingerprint)
+                {
+                    infos.Add(hit.Info);
+                    continue;
+                }
+            var info = BuildInfo(name, path, file.Length);
+            lock (_infoLock) _infos[path] = (fingerprint, info);
+            infos.Add(info);
+        }
+        return infos;
+    }
+
+    private ModelInfo BuildInfo(string name, string path, long fileBytes)
+    {
+        try
+        {
+            var peek = Checkpointing.PeekInfo(path);
+            var c = peek.Config;
+            // Same probe ChatSession uses: an instruct model's tokenizer has the ChatML markers as single tokens.
+            bool instruct = false;
+            try { instruct = GetTokenizer(name) is { } tok && tok.Encode("<|im_start|>").Count == 1; }
+            catch (Exception) { /* metadata-less tokenizer → not instruct */ }
+            return new ModelInfo(name, CountParams(c), c.LayerCount, c.MaxSequenceLength, c.VocabSize,
+                peek.TokenizerKind, peek.ComputeDType.ToString(), peek.Step, instruct, fileBytes, null);
+        }
+        catch (Exception e) // metadata-less/corrupt checkpoint: still listed so the user can see + delete it
+        {
+            return new ModelInfo(name, 0, 0, 0, 0, "", "", 0, false, fileBytes, e.Message);
+        }
+    }
+
+    // Weight count from the architecture (tied LM head — the embedding is shared, so no separate head term).
+    private static long CountParams(ProjectAI.Models.ModelConfig c)
+    {
+        long d = c.EmbeddingDim, ffn = c.FeedForwardHiddenDim, kvDim = (long)c.KvHeadCount * c.HeadDim;
+        long perLayer = 2L * d * d      // Q and O projections
+                      + 2L * d * kvDim  // K and V projections (GQA-sized)
+                      + 3L * d * ffn    // SwiGLU gate/up/down
+                      + 2L * d;         // the two RMSNorm weights
+        return (long)c.VocabSize * d + c.LayerCount * perLayer + d; // embedding + layers + final norm
+    }
+
     /// <summary>Resolves and loads a model by name; null if the name doesn't map to a checkpoint in the directory.</summary>
     public LoadedModel? Get(string name)
     {
@@ -82,3 +145,9 @@ internal sealed class ModelRegistry
 }
 
 internal sealed record LoadedModel(string Name, LlamaModel Model, ModelConfig Config, ITokenizer Tokenizer, int Step);
+
+/// <summary>One /health catalog entry. <see cref="Error"/> is set (and the numeric fields zero) when the
+/// checkpoint's metadata couldn't be read.</summary>
+internal sealed record ModelInfo(
+    string Name, long Params, int Layers, int Ctx, int Vocab, string TokenizerKind, string Dtype, int Step,
+    bool Instruct, long FileBytes, string? Error);

@@ -32,6 +32,10 @@ public sealed class AppState
     public event Action SelectionChanged;
     public event Action JobsChanged;
     public event Action PrefsChanged;
+    public event Action<string> NavigateRequested;
+
+    /// <summary>Cross-view navigation ("Chat with" on a model card) — views raise this; the shell routes it.</summary>
+    public void RequestNavigate(string viewId) => NavigateRequested?.Invoke(viewId);
 
     public void SetHealth(HealthResult health)
     {
