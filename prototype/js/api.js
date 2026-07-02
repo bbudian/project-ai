@@ -116,7 +116,8 @@
         try { msg = JSON.parse(ev.data); } catch (e) { return; }
         switch (msg.type) {
           case 'token':   handlers.onToken && handlers.onToken(msg.text || ''); break;
-          case 'sources': handlers.onSources && handlers.onSources(msg.sources || []); break;
+          // The server sends the list under 'items' (only POST /generate uses top-level 'sources'); accept both.
+          case 'sources': handlers.onSources && handlers.onSources(msg.items || msg.sources || []); break;
           case 'done':    handlers.onDone && handlers.onDone(msg); break;
           case 'ready':   /* server acked start */ break;
           case 'error':   handlers.onError && handlers.onError(new Error(msg.error || 'chat error')); break;
@@ -158,9 +159,11 @@
     });
   };
 
-  // GET /train/status -> { state, name, step, totalSteps, loss, error? }
+  // GET /train/status -> { training: { state, name, step, totalSteps, loss, error? } } — the server nests the
+  // payload under 'training'; unwrap before reading (tolerating a flat shape too).
   api.trainStatus = function () {
-    return request('GET', '/train/status', undefined, 8000).then(function (d) {
+    return request('GET', '/train/status', undefined, 8000).then(function (raw) {
+      var d = (raw && raw.training) ? raw.training : (raw || {});
       return {
         state: d.state || 'idle',
         name: d.name || null,

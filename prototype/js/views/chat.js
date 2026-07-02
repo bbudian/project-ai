@@ -298,7 +298,7 @@
             var summary = '';
             if (activeTurn) {
               activeTurn.streaming = false;
-              if (info && info.stop === 'cancelled' && !activeTurn.text) {
+              if (info && (info.stop === 'cancelled' || info.stop === 'canceled') && !activeTurn.text) { // live server spells it 'canceled'
                 activeTurn.text = '(stopped)';
               }
               if (info && info.stop) {
