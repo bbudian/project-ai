@@ -42,6 +42,11 @@ public partial class ApiClient : Node, IApiClient
     public event Action<MemoryListResult> MemoryListReceived;
     public event Action<MemoryRenderResult> MemoryRenderReceived;
     public event Action<MemorySaveResult> MemorySaved;
+    public event Action<BenchStartResult> BenchStarted;
+    public event Action<BenchStatusInfo> BenchStatusReceived;
+    public event Action<BenchSuiteInfo[]> BenchSuitesReceived;
+    public event Action<BenchRunSummary[]> BenchRunsReceived;
+    public event Action<BenchRunDetail> BenchRunReceived;
 
     public override void _Ready()
     {
@@ -113,6 +118,113 @@ public partial class ApiClient : Node, IApiClient
             data => MemorySaved?.Invoke(new MemorySaveResult(true, data.Str("id"), null)),
             error => MemorySaved?.Invoke(new MemorySaveResult(false, "", error)),
             Poll: false));
+    }
+
+    // ---- benchmark endpoints ---------------------------------------------------------------------------------
+
+    public void StartBenchmark(BenchStartRequest request)
+    {
+        var models = new Godot.Collections.Array();
+        foreach (var m in request.Models) models.Add(m);
+        var body = new Godot.Collections.Dictionary
+        {
+            { "suite", request.Suite }, { "models", models }, { "repeats", request.Repeats },
+        };
+        if (!string.IsNullOrEmpty(request.Backend)) body["backend"] = request.Backend;
+        Send(new Pending("/benchmark", Godot.HttpClient.Method.Post, Json.Stringify(body),
+            data => BenchStarted?.Invoke(new BenchStartResult(true, data.Str("runId"), data.Int("total"), null)),
+            error => BenchStarted?.Invoke(new BenchStartResult(false, "", 0, error)),
+            Poll: false));
+    }
+
+    // A poll (like /train/status): dropped when a slot isn't free — the timer just asks again.
+    public void CheckBenchStatus() => Send(new Pending(
+        "/benchmark/status", Godot.HttpClient.Method.Get, null,
+        data => BenchStatusReceived?.Invoke(ParseBenchStatus(data)),
+        error => BenchStatusReceived?.Invoke(new BenchStatusInfo("error", "", "", 0, 0, "", "", error)),
+        Poll: true));
+
+    public void CancelBenchmark() => Send(new Pending(
+        "/benchmark/cancel", Godot.HttpClient.Method.Post, "{}",
+        _ => { }, _ => { }, Poll: false));
+
+    public void FetchBenchSuites() => Send(new Pending(
+        "/benchmark/suites", Godot.HttpClient.Method.Get, null,
+        data =>
+        {
+            var arr = data.Arr("suites");
+            var suites = new BenchSuiteInfo[arr.Count];
+            for (int i = 0; i < suites.Length; i++)
+            {
+                var s = arr[i].AsGodotDictionary();
+                suites[i] = new BenchSuiteInfo(s.Str("id"), s.Str("label"), s.Int("caseCount"), s.Bool("hasCorpus"));
+            }
+            BenchSuitesReceived?.Invoke(suites);
+        },
+        _ => BenchSuitesReceived?.Invoke([]),
+        Poll: false));
+
+    public void FetchBenchRuns() => Send(new Pending(
+        "/benchmark/runs", Godot.HttpClient.Method.Get, null,
+        data =>
+        {
+            var arr = data.Arr("runs");
+            var runs = new BenchRunSummary[arr.Count];
+            for (int i = 0; i < runs.Length; i++)
+            {
+                var r = arr[i].AsGodotDictionary();
+                var modelsArr = r.Arr("models");
+                var models = new string[modelsArr.Count];
+                for (int m = 0; m < models.Length; m++) models[m] = modelsArr[m].AsString();
+                runs[i] = new BenchRunSummary(r.Str("id"), r.Str("suiteId"), models, r.Str("backend"),
+                    r.Str("startedUtc"), r.Str("state"), r.Int("cases"));
+            }
+            BenchRunsReceived?.Invoke(runs);
+        },
+        _ => BenchRunsReceived?.Invoke([]),
+        Poll: false));
+
+    public void FetchBenchRun(string id) => Send(new Pending(
+        "/benchmark/run/" + Uri.EscapeDataString(id), Godot.HttpClient.Method.Get, null,
+        data => BenchRunReceived?.Invoke(ParseBenchRun(data)),
+        error => BenchRunReceived?.Invoke(new BenchRunDetail(false, id, "", "", [], [], error)),
+        Poll: false));
+
+    private static BenchStatusInfo ParseBenchStatus(Godot.Collections.Dictionary data)
+    {
+        var b = data.ContainsKey("bench") ? data["bench"].AsGodotDictionary() : data;
+        return new BenchStatusInfo(
+            b.Str("state", "idle"), b.Str("runId"), b.Str("suite"), b.Int("done"), b.Int("total"),
+            b.Str("currentModel"), b.Str("currentCase"), b.Str("error", null));
+    }
+
+    // Hand-written walker over the camelCased BenchRun graph — the client never references server types (net8/net10).
+    private static BenchRunDetail ParseBenchRun(Godot.Collections.Dictionary data)
+    {
+        var aggArr = data.Arr("aggregates");
+        var aggregates = new BenchAggregateInfo[aggArr.Count];
+        for (int i = 0; i < aggregates.Length; i++)
+        {
+            var a = aggArr[i].AsGodotDictionary();
+            // meanBpb is null when the suite had no corpus — surface as NaN so the UI prints "—".
+            double bpb = a.ContainsKey("meanBpb") && a["meanBpb"].VariantType is Variant.Type.Float or Variant.Type.Int
+                ? a["meanBpb"].AsDouble() : double.NaN;
+            aggregates[i] = new BenchAggregateInfo(
+                a.Str("model"), a.Int("n"), bpb, a.Float("medianTokPerSec"), a.Float("checkPassRate"));
+        }
+
+        var cellArr = data.Arr("cells");
+        var cells = new List<BenchCellInfo>(cellArr.Count);
+        for (int i = 0; i < cellArr.Count; i++)
+        {
+            var c = cellArr[i].AsGodotDictionary();
+            if (c.Str("caseId") == "__bpb__") continue; // bookkeeping cell, not a case
+            cells.Add(new BenchCellInfo(
+                c.Str("model"), c.Str("caseId"), c.Str("output"), c.Int("generatedTokens"), c.Str("stop"),
+                c.Float("medianTokPerSec"), c.Float("checkPassRate"), c.Str("error", null)));
+        }
+
+        return new BenchRunDetail(true, data.Str("id"), data.Str("suiteId"), data.Str("state"), aggregates, [.. cells], null);
     }
 
     private static MemoryListResult ParseMemoryList(Godot.Collections.Dictionary data)

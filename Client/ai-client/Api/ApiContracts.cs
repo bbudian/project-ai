@@ -14,6 +14,12 @@ public interface IApiClient
     void MemoryList(string store, string query);
     void MemoryRender(string store, string query);
     void MemoryPut(string store, string title, string[] keys, string body, string tier, string trust);
+    void StartBenchmark(BenchStartRequest request);
+    void CheckBenchStatus();
+    void CancelBenchmark();
+    void FetchBenchSuites();
+    void FetchBenchRuns();
+    void FetchBenchRun(string id);
     event Action<HealthResult> HealthReceived;
     event Action<TrainStartResult> TrainStarted;
     event Action<TrainStatus> TrainStatusReceived;
@@ -21,6 +27,11 @@ public interface IApiClient
     event Action<MemoryListResult> MemoryListReceived;
     event Action<MemoryRenderResult> MemoryRenderReceived;
     event Action<MemorySaveResult> MemorySaved;
+    event Action<BenchStartResult> BenchStarted;
+    event Action<BenchStatusInfo> BenchStatusReceived;
+    event Action<BenchSuiteInfo[]> BenchSuitesReceived;
+    event Action<BenchRunSummary[]> BenchRunsReceived;
+    event Action<BenchRunDetail> BenchRunReceived;
 }
 
 /// <summary>One generation request: the prompt, the chosen model and compute backend (empty = server default), decoding settings, whether to ground the answer in a live web search (RAG), and whether to attach the server-side memory store (session-scoped — honored on the chat start frame). Carried over the chat WebSocket (the old REST /generate result type was retired in favor of streaming).</summary>
@@ -61,6 +72,34 @@ public sealed record MemoryRenderResult(bool Ok, string Bridge, string Recall, s
 
 /// <summary>Result of a manual memory inject (PUT /memory).</summary>
 public sealed record MemorySaveResult(bool Ok, string Id, string Error);
+
+/// <summary>A benchmark run request (POST /benchmark). Decoding is greedy with a fixed seed — the v1 rigor rule.</summary>
+public sealed record BenchStartRequest(string Suite, string[] Models, string Backend, int Repeats);
+
+/// <summary>202 from POST /benchmark: the run id to follow, and how many (model, case) cells it will produce.</summary>
+public sealed record BenchStartResult(bool Ok, string RunId, int Total, string Error);
+
+/// <summary>Live progress from GET /benchmark/status. State is idle | running | done | canceled | error.</summary>
+public sealed record BenchStatusInfo(
+    string State, string RunId, string Suite, int Done, int Total, string CurrentModel, string CurrentCase, string Error);
+
+/// <summary>One suite the server offers (GET /benchmark/suites).</summary>
+public sealed record BenchSuiteInfo(string Id, string Label, int CaseCount, bool HasCorpus);
+
+/// <summary>One past run in the Reports list (GET /benchmark/runs).</summary>
+public sealed record BenchRunSummary(string Id, string SuiteId, string[] Models, string Backend, string StartedUtc, string State, int Cases);
+
+/// <summary>Per-model aggregates of a finished run. Bpb is NaN when the suite had no eval corpus.</summary>
+public sealed record BenchAggregateInfo(string Model, int N, double Bpb, double MedianTokPerSec, double CheckPassRate);
+
+/// <summary>One (model, case) cell of a finished run — enough for the Compare grid and the output diff.</summary>
+public sealed record BenchCellInfo(
+    string Model, string CaseId, string Output, int GeneratedTokens, string Stop, double MedianTokPerSec,
+    double CheckPassRate, string Error);
+
+/// <summary>A full run (GET /benchmark/run/{id}), reduced to what the Compare view renders.</summary>
+public sealed record BenchRunDetail(
+    bool Ok, string Id, string SuiteId, string State, BenchAggregateInfo[] Aggregates, BenchCellInfo[] Cells, string Error);
 
 /// <summary>A request to train a new model on the server: a name, the training text, a size preset, step count, and compute backend.</summary>
 public sealed record TrainRequest(string Name, string Text, string Size, int Steps, string Backend);
