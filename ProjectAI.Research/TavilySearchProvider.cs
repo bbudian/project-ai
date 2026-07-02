@@ -17,25 +17,32 @@ public sealed class TavilySearchProvider : ISearchProvider
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
-    private readonly string? _apiKey;
+    private readonly Func<string?> _resolveKey;
 
     public TavilySearchProvider(string? apiKey = null)
-        => _apiKey = string.IsNullOrWhiteSpace(apiKey) ? Environment.GetEnvironmentVariable("TAVILY_API_KEY") : apiKey;
+        => _resolveKey = string.IsNullOrWhiteSpace(apiKey)
+            ? static () => Environment.GetEnvironmentVariable("TAVILY_API_KEY")
+            : () => apiKey;
+
+    /// <summary>Resolve the key per request (e.g. from a server-side secret store), so a key saved while the
+    /// server runs takes effect immediately — no restart, no stale singleton.</summary>
+    public TavilySearchProvider(Func<string?> keyResolver) => _resolveKey = keyResolver;
 
     public string Name => "tavily";
-    public bool IsConfigured => !string.IsNullOrWhiteSpace(_apiKey);
-    public string? Unavailable => IsConfigured ? null : "set the TAVILY_API_KEY environment variable (free key at tavily.com)";
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(_resolveKey());
+    public string? Unavailable => IsConfigured ? null : "set the Tavily API key (Settings → Web search, or the TAVILY_API_KEY environment variable; free key at tavily.com)";
 
     public async Task<IReadOnlyList<SearchResult>> SearchAsync(string query, int maxResults, CancellationToken ct = default)
     {
-        if (!IsConfigured) throw new InvalidOperationException($"Tavily is not configured: {Unavailable}.");
+        string? apiKey = _resolveKey();
+        if (string.IsNullOrWhiteSpace(apiKey)) throw new InvalidOperationException($"Tavily is not configured: {Unavailable}.");
 
         var request = new TavilyRequest(query, Math.Clamp(maxResults, 1, 20), "basic", false, "general");
         using var msg = new HttpRequestMessage(HttpMethod.Post, Endpoint)
         {
             Content = new StringContent(JsonSerializer.Serialize(request, JsonOpts), Encoding.UTF8, "application/json"),
         };
-        msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+        msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
         using var resp = await Http.SendAsync(msg, ct);
         string json = await resp.Content.ReadAsStringAsync(ct);

@@ -24,8 +24,9 @@ internal static class Server
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
     // Web research (RAG): fetch current web results and ground the prompt in them. Tavily behind the ISearchProvider
-    // seam (reads TAVILY_API_KEY); swap the provider here to change search backends.
-    private static readonly WebResearcher Researcher = new(new TavilySearchProvider());
+    // seam; the key resolves per request through SecretStore (env wins, else config/secrets.json via
+    // PUT /config/secrets/tavily) so a key saved from Settings takes effect without a restart.
+    private static readonly WebResearcher Researcher = new(new TavilySearchProvider(() => SecretStore.Resolve("tavily").Value));
 
     // Per-user long-term memory (multi-client): stores are resolved lazily per (user, store) under the memory root.
     private static MemoryStoreRegistry? _memory;
@@ -150,6 +151,15 @@ internal static class Server
                 return;
             }
 
+            // ---- app config + write-only secrets (PUT/DELETE so browser preflight blocks cross-origin writes) --
+            if (req.HttpMethod == "GET" && path == "/config") { HandleConfigGet(res); return; }
+            if (req.HttpMethod == "PUT" && path == "/config") { HandleConfigPut(req, res); return; }
+            if ((req.HttpMethod is "PUT" or "DELETE") && path.StartsWith("/config/secrets/", StringComparison.Ordinal))
+            {
+                HandleSecret(req, res, path["/config/secrets/".Length..]);
+                return;
+            }
+
             // ---- memory (M0): catalog + injection preview + manual inject -------------------------------------
             if (req.HttpMethod == "GET" && path == "/memory") { HandleMemoryList(req, res); return; }
             if (req.HttpMethod == "GET" && path == "/memory/render") { HandleMemoryRender(req, res); return; }
@@ -229,6 +239,74 @@ internal static class Server
     // Serializes the actual model forward pass: the model/backend (KV cache, libtorch DisposeScopes) is not
     // thread-safe, so only one generation runs at a time even though requests are now handled on multiple threads.
     private static readonly object InferenceLock = new();
+
+    // ---- config + secrets -------------------------------------------------------------------------------------
+
+    /// <summary>GET /config — the app settings plus secret PRESENCE (key/set/hint/source; never values).</summary>
+    private static void HandleConfigGet(HttpListenerResponse res)
+    {
+        var m = SettingsStore.Current.Memory;
+        WriteJson(res, 200, new
+        {
+            memory = new { bridgeCards = m.BridgeCards, bridgeBudget = m.BridgeBudget, recallHits = m.RecallHits, recallBudget = m.RecallBudget },
+            secrets = SecretStore.KnownKeys.Select(SecretStore.Status),
+        });
+    }
+
+    private sealed record ConfigIn(MemoryIn? Memory);
+    private sealed record MemoryIn(int? BridgeCards, int? BridgeBudget, int? RecallHits, int? RecallBudget);
+
+    /// <summary>PUT /config — partial update; absent fields keep their current value. 400 lists every problem.</summary>
+    private static void HandleConfigPut(HttpListenerRequest req, HttpListenerResponse res)
+    {
+        const int maxBody = 64 << 10;
+        if (req.ContentLength64 > maxBody) { WriteJson(res, 413, new { error = "request body too large" }); return; }
+        string body;
+        using (var reader = new StreamReader(req.InputStream, req.ContentEncoding)) body = reader.ReadToEnd();
+
+        ConfigIn? cfg;
+        try { cfg = JsonSerializer.Deserialize<ConfigIn>(body, JsonOpts); }
+        catch (JsonException) { WriteJson(res, 400, new { error = "invalid JSON body" }); return; }
+        if (cfg is null) { WriteJson(res, 400, new { error = "empty body" }); return; }
+
+        var current = SettingsStore.Current.Memory;
+        var next = new AppSettings(new MemorySettings(
+            cfg.Memory?.BridgeCards ?? current.BridgeCards,
+            cfg.Memory?.BridgeBudget ?? current.BridgeBudget,
+            cfg.Memory?.RecallHits ?? current.RecallHits,
+            cfg.Memory?.RecallBudget ?? current.RecallBudget));
+        var problems = SettingsStore.Update(next);
+        if (problems.Count > 0) { WriteJson(res, 400, new { problems }); return; }
+        HandleConfigGet(res); // echo the applied state
+    }
+
+    private sealed record SecretIn(string? Value);
+
+    /// <summary>PUT /config/secrets/{key} {value} sets; DELETE clears. The response is always masked status.</summary>
+    private static void HandleSecret(HttpListenerRequest req, HttpListenerResponse res, string key)
+    {
+        if (!SecretStore.IsKnown(key))
+        { WriteJson(res, 400, new { error = $"unknown secret '{key}' (known: {string.Join(", ", SecretStore.KnownKeys)})" }); return; }
+
+        if (req.HttpMethod == "DELETE")
+        {
+            SecretStore.Delete(key);
+            WriteJson(res, 200, SecretStore.Status(key));
+            return;
+        }
+
+        const int maxBody = 16 << 10;
+        if (req.ContentLength64 > maxBody) { WriteJson(res, 413, new { error = "request body too large" }); return; }
+        string body;
+        using (var reader = new StreamReader(req.InputStream, req.ContentEncoding)) body = reader.ReadToEnd();
+        SecretIn? sec;
+        try { sec = JsonSerializer.Deserialize<SecretIn>(body, JsonOpts); }
+        catch (JsonException) { WriteJson(res, 400, new { error = "invalid JSON body" }); return; }
+        if (sec is null || string.IsNullOrWhiteSpace(sec.Value)) { WriteJson(res, 400, new { error = "missing 'value'" }); return; }
+
+        SecretStore.Set(key, sec.Value.Trim());
+        WriteJson(res, 200, SecretStore.Status(key)); // never echoes the value
+    }
 
     // ---- memory endpoints (M0 read/list + manual inject) -----------------------------------------------------
     // All go through MemoryStoreRegistry.Resolve, which keeps the traversal protection; user/store default to the

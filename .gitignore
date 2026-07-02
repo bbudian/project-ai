@@ -14,3 +14,4 @@ riderModule.iml
 .dotnet/
 hf-models/
 memory/          # per-user long-term memory stores (runtime data, not source)
+config/          # server settings + secrets (secrets.json must never be committed)

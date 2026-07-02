@@ -20,6 +20,10 @@ public interface IApiClient
     void FetchBenchSuites();
     void FetchBenchRuns();
     void FetchBenchRun(string id);
+    void FetchConfig();
+    void SaveMemoryBudgets(int bridgeCards, int bridgeBudget, int recallHits, int recallBudget);
+    void SaveSecret(string key, string value);
+    void ClearSecret(string key);
     event Action<HealthResult> HealthReceived;
     event Action<TrainStartResult> TrainStarted;
     event Action<TrainStatus> TrainStatusReceived;
@@ -32,7 +36,16 @@ public interface IApiClient
     event Action<BenchSuiteInfo[]> BenchSuitesReceived;
     event Action<BenchRunSummary[]> BenchRunsReceived;
     event Action<BenchRunDetail> BenchRunReceived;
+    event Action<ConfigInfo> ConfigReceived;
+    event Action<SecretStatus> SecretUpdated;
 }
+
+/// <summary>A secret's presence on the server (never its value): set + a last-4 hint + where it came from ("env" | "config").</summary>
+public sealed record SecretStatus(bool Ok, string Key, bool Set, string Hint, string Source, string Error);
+
+/// <summary>GET /config: the server-side memory injection budgets plus secret presence.</summary>
+public sealed record ConfigInfo(
+    bool Ok, int BridgeCards, int BridgeBudget, int RecallHits, int RecallBudget, SecretStatus[] Secrets, string Error);
 
 /// <summary>One generation request: the prompt, the chosen model and compute backend (empty = server default), decoding settings, whether to ground the answer in a live web search (RAG), and whether to attach the server-side memory store (session-scoped — honored on the chat start frame). Carried over the chat WebSocket (the old REST /generate result type was retired in favor of streaming).</summary>
 public sealed record GenerateRequest(string Prompt, string Model, string Backend, bool Sample, float Temperature, int TopK, float TopP, int MaxTokens, bool Research, bool Memory, ulong Seed);

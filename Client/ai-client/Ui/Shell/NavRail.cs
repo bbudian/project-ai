@@ -8,6 +8,7 @@ using Godot;
 public partial class NavRail : PanelContainer
 {
     public event Action<string> Navigated;
+    public event Action SettingsRequested;
 
     private readonly Dictionary<string, RailButton> _buttons = new();
     private VBoxContainer _column;
@@ -31,8 +32,7 @@ public partial class NavRail : PanelContainer
         _column.AddChild(new Control { SizeFlagsVertical = SizeFlags.ExpandFill }); // push gear + footer to the bottom
 
         var gear = Palette.GhostButton("⚙   Settings");
-        gear.Disabled = true;
-        gear.TooltipText = "Settings arrives with a later milestone (see docs/CLIENT_DESIGN.md).";
+        gear.Pressed += () => SettingsRequested?.Invoke();
         _column.AddChild(gear);
     }
 

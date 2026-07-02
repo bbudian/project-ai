@@ -39,6 +39,9 @@ public partial class ConnectionPanel : PanelContainer
         column.AddChild(_status);
 
         _state.HealthChanged += Refresh;
+        // The Settings window edits the same URL; mirror it here. (Setting LineEdit.Text programmatically does not
+        // re-emit TextChanged, so this cannot loop.)
+        _state.ServerUrlChanged += () => { if (_url.Text != _state.ServerUrl) _url.Text = _state.ServerUrl; };
         Refresh(); // render whatever state already exists (no-op before the first /health lands)
     }
 

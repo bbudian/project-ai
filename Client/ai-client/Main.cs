@@ -63,6 +63,10 @@ public partial class Main : Control
         connection.CheckRequested += () => _api.CheckHealth();
         rail.AddFooter(connection);
 
+        var settings = new SettingsWindow(_state, _api);
+        AddChild(settings);
+        rail.SettingsRequested += settings.Open;
+
         var host = new ViewHost();
         shell.AddChild(host);
 

@@ -47,6 +47,8 @@ public partial class ApiClient : Node, IApiClient
     public event Action<BenchSuiteInfo[]> BenchSuitesReceived;
     public event Action<BenchRunSummary[]> BenchRunsReceived;
     public event Action<BenchRunDetail> BenchRunReceived;
+    public event Action<ConfigInfo> ConfigReceived;
+    public event Action<SecretStatus> SecretUpdated;
 
     public override void _Ready()
     {
@@ -225,6 +227,57 @@ public partial class ApiClient : Node, IApiClient
         }
 
         return new BenchRunDetail(true, data.Str("id"), data.Str("suiteId"), data.Str("state"), aggregates, [.. cells], null);
+    }
+
+    // ---- config + secrets ------------------------------------------------------------------------------------
+
+    public void FetchConfig() => Send(new Pending(
+        "/config", Godot.HttpClient.Method.Get, null,
+        data => ConfigReceived?.Invoke(ParseConfig(data)),
+        error => ConfigReceived?.Invoke(new ConfigInfo(false, 0, 0, 0, 0, [], error)),
+        Poll: false));
+
+    public void SaveMemoryBudgets(int bridgeCards, int bridgeBudget, int recallHits, int recallBudget)
+    {
+        var body = new Godot.Collections.Dictionary
+        {
+            { "memory", new Godot.Collections.Dictionary
+            {
+                { "bridgeCards", bridgeCards }, { "bridgeBudget", bridgeBudget },
+                { "recallHits", recallHits }, { "recallBudget", recallBudget },
+            } },
+        };
+        Send(new Pending("/config", Godot.HttpClient.Method.Put, Json.Stringify(body),
+            data => ConfigReceived?.Invoke(ParseConfig(data)),
+            error => ConfigReceived?.Invoke(new ConfigInfo(false, 0, 0, 0, 0, [], error)),
+            Poll: false));
+    }
+
+    public void SaveSecret(string key, string value) => Send(new Pending(
+        "/config/secrets/" + Uri.EscapeDataString(key), Godot.HttpClient.Method.Put,
+        Json.Stringify(new Godot.Collections.Dictionary { { "value", value } }),
+        data => SecretUpdated?.Invoke(ParseSecret(data)),
+        error => SecretUpdated?.Invoke(new SecretStatus(false, key, false, "", "", error)),
+        Poll: false));
+
+    public void ClearSecret(string key) => Send(new Pending(
+        "/config/secrets/" + Uri.EscapeDataString(key), Godot.HttpClient.Method.Delete, null,
+        data => SecretUpdated?.Invoke(ParseSecret(data)),
+        error => SecretUpdated?.Invoke(new SecretStatus(false, key, false, "", "", error)),
+        Poll: false));
+
+    private static SecretStatus ParseSecret(Godot.Collections.Dictionary d) =>
+        new(true, d.Str("key"), d.Bool("set"), d.Str("hint"), d.Str("source"), null);
+
+    private static ConfigInfo ParseConfig(Godot.Collections.Dictionary data)
+    {
+        var m = data.ContainsKey("memory") ? data["memory"].AsGodotDictionary() : new Godot.Collections.Dictionary();
+        var secretsArr = data.Arr("secrets");
+        var secrets = new SecretStatus[secretsArr.Count];
+        for (int i = 0; i < secrets.Length; i++)
+            secrets[i] = ParseSecret(secretsArr[i].AsGodotDictionary());
+        return new ConfigInfo(true,
+            m.Int("bridgeCards"), m.Int("bridgeBudget"), m.Int("recallHits"), m.Int("recallBudget"), secrets, null);
     }
 
     private static MemoryListResult ParseMemoryList(Godot.Collections.Dictionary data)
