@@ -43,8 +43,12 @@ One concern per project. Every arrow in the table is a *compile-time* `ProjectRe
 | `ProjectAI.Tokenizers` | Byte-level BPE | none |
 | `ProjectAI.Formats` | safetensors / GGUF loaders, `StateDict` | Core |
 | `ProjectAI.Models` | Llama-style transformer (RoPE/GQA/RMSNorm/SwiGLU), KV cache, samplers | Core |
-| `ProjectAI.Training` | Training loop, datasets, checkpointing | Core, Models, Formats, Tokenizers |
-| `ProjectAI` (CLI) | Composition root: picks a backend, wires `generate`/`train`/`convert` | all of the above |
+| `ProjectAI.Training` | Training loop, datasets, checkpointing, shared `Inference` | Core, Models, Formats, Tokenizers |
+| `ProjectAI.Memory` | File-based long-term memory (`IMemoryStore`/`FileMemoryStore`): bridge, Stage-0 recall, trust boundary | none |
+| `ProjectAI.Bench` | The accuracy instrument: suites, deterministic checks, bpb scorer, `BenchRunner` + markdown reports | Training |
+| `ProjectAI.Research` | Web search RAG behind `ISearchProvider` (Tavily) | none |
+| `ProjectAI.Trainer` | Standalone trainer launcher (`train.cmd` / `Train-Model.ps1`) | Core, Backends, Models, Training |
+| `ProjectAI` (CLI) | Composition root: picks a backend, wires `generate`/`train`/`convert`/`bench`/`serve` | all of the above |
 | `ProjectAI.Tests` | xUnit v3: contract tests (live); gradient-check (S0-6) and backend-conformance (S2-1) suites land with those stages | Core, Backends.Cpu, Models |
 
 ## SOLID, concretely
@@ -225,3 +229,20 @@ CLI and via `POST /train`→poll→`/generate`. *(Caveat: the dev/test GPU is 8G
 path, finish **S2-6** backend selection.
 (Deferred: `NamedParameters` ordering at S1-4; **RoPE scaling** + Llama-3 pre-tokenizer regex in convert; paged
 KV cache (S3-4) — see `docs/BUILD_PLAN.md`.)
+**App milestone (2026-07-02, P0–P5 — see `docs/DEEP_DIVE_REVIEW_2026-07-01.md` for the review that scoped it):**
+the Godot client is now the spec'd shell (`docs/CLIENT_DESIGN.md`): NavRail + ViewHost/IView routing over an
+`AppState` store, destinations **Chat / Models / Benchmark / Memory** + a **Settings** modal, prefs persisted to
+`user://settings.json`, pooled `ApiClient` (queued user actions, self-deduping polls, latest-wins `/health`).
+Chat sends memory/user/store on the WS start frame (session restart on toggle) + a context meter from the
+ready/done frames. Server: `/health` grew a `modelInfos` catalog (metadata-only checkpoint reads, cached by file
+fingerprint); memory endpoints `GET /memory`, `GET /memory/render`, `PUT /memory` (PUT so browser preflight blocks
+cross-origin writes) + the recall fix (keyed miss → empty, never the global-top fallback); **ProjectAI.Bench**
+(bpb over a held-out corpus + greedy deterministic checks + warmup-discarded medians, sha-stamped models) with the
+`projectai bench` CLI, `benchmarks/suites/baseline.json`, and `/benchmark*` + `/score` endpoints via
+`BenchmarkService` (TrainingService twin, per-case `InferenceLock`); the **unified GPU gate** (generate/chat/train/
+bench all 409 while another job kind runs — chat previously bypassed the training gate); `GET/PUT /config`
+(memory budgets, live via the `MemoryPolicy` facade) + write-only `PUT/DELETE /config/secrets/{key}` (ACL-locked
+`config/secrets.json`, env wins, Tavily key resolves per request). Also fixed: the padded-vocab sampler trap in
+both decode paths (row width = `config.VocabSize`, sample window capped at tokenizer ids). Baseline reference:
+smollm2-360m @ torch:cuda → **bpb 1.0035, ~46 tok/s** (`benchmarks/reports/baseline-smollm2-360m.md`).
+`dotnet test` green (312 passing, 0 skipped).
