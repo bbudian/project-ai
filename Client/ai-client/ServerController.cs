@@ -45,7 +45,7 @@ public partial class ServerController : Node
         {
             if (Starting && _process is { HasExited: true })
             {
-                Fail($"the server exited (code {_process.ExitCode}) — check its console output");
+                Fail(DescribeExit(_process.ExitCode));
                 return;
             }
             _api.CheckHealth();
@@ -78,13 +78,19 @@ public partial class ServerController : Node
             return;
         }
 
+        string repoRoot = DiscoverRepoRoot();
         var psi = new ProcessStartInfo
         {
             FileName = exe,
-            WorkingDirectory = DiscoverRepoRoot() ?? Path.GetDirectoryName(exe) ?? ".",
+            WorkingDirectory = repoRoot ?? Path.GetDirectoryName(exe) ?? ".",
             UseShellExecute = false,
             CreateNoWindow = false, // a console app with no parent console gets its own window → live server logs
         };
+        // The repo may carry its own .NET SDK (.dotnet/) holding the runtime the server needs. A bare apphost only
+        // searches DOTNET_ROOT + the machine-wide install, so on a machine without a global .NET 10 the exe dies
+        // with 0x80008096 (FrameworkMissingFailure) — point it at the repo runtime the way `dotnet run` would.
+        if (repoRoot is not null && Directory.Exists(Path.Combine(repoRoot, ".dotnet")))
+            psi.EnvironmentVariables["DOTNET_ROOT"] = Path.Combine(repoRoot, ".dotnet");
         psi.ArgumentList.Add("serve");
         psi.ArgumentList.Add("--models");
         psi.ArgumentList.Add(modelsDir);
@@ -132,6 +138,19 @@ public partial class ServerController : Node
         Error = message;
         _pollTimer.Stop();
         Changed?.Invoke();
+    }
+
+    // The .NET apphost's failure codes are 0x800080xx; decode the ones a user can actually act on.
+    private static string DescribeExit(int code)
+    {
+        uint hex = unchecked((uint)code);
+        return hex switch
+        {
+            0x80008096 => "the server exited: the .NET 10 runtime wasn't found (0x80008096). Install .NET 10, or keep "
+                        + "the repo's .dotnet folder — the app points the server at it automatically when present.",
+            0x80008083 or 0x80008085 => $"the server exited: its .NET host installation looks broken (0x{hex:X8}) — reinstall the .NET runtime.",
+            _ => $"the server exited (code {code} / 0x{hex:X8}) — check its console output",
+        };
     }
 
     // ---- multi-server discovery + remote stop -------------------------------------------------------------------
