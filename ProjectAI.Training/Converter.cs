@@ -39,7 +39,9 @@ public static class Converter
         var weights = LoadWeights(path, directory, backend, computeDType);
         CheckCompatibility(configJson, weights);
 
-        var model = new LlamaModel(ParameterContext.Create(backend, 0, computeDType), config);
+        // SkipInit: CopyWeights overwrites every parameter (and throws on a missing one), so the eager Gaussian
+        // init would be pure waste — on a billion-parameter convert it is the dominant cost.
+        var model = new LlamaModel(ParameterContext.Create(backend, 0, computeDType) with { SkipInit = true }, config);
         CopyWeights(weights, model, backend);
         return (model, config);
     }

@@ -14,6 +14,14 @@ public sealed record ParameterContext(IComputeBackend Backend, Autograd Ag, IRng
     /// </summary>
     public DType ComputeDType { get; init; } = DType.F32;
 
+    /// <summary>
+    /// Skips random parameter initialization (params stay zero-filled per <see cref="IComputeBackend.Allocate"/>'s
+    /// contract). For checkpoint/convert load paths that overwrite every weight anyway: a billion-parameter model
+    /// otherwise pays a billion sequential Gaussian draws just to throw them away — the dominant cost of model
+    /// loading. Never set this for training-from-scratch: zero-init breaks symmetry-dependent layers.
+    /// </summary>
+    public bool SkipInit { get; init; }
+
     /// <summary>Builds a context over a backend with a fresh autograd facade and a seeded RNG (F32 params).</summary>
     public static ParameterContext Create(IComputeBackend backend, ulong seed) =>
         new(backend, new Autograd(backend), new PcgRng(seed));
@@ -60,7 +68,11 @@ public abstract class Module
     {
         var p = Backend.Allocate(shape, Ctx.ComputeDType); // zero-initialized, in the model's precision (S3-1)
         p.RequiresGrad = true;
-        using (GradMode.NoGrad()) init.Fill(p, Backend, Ctx.Rng);
+        // SkipInit: load paths overwrite every weight from disk, so the (expensive, sequential) random fill is
+        // pure waste there. Anything NOT subsequently overwritten stays zero — ApplyWeights-style loaders throw
+        // on a missing parameter, so a half-loaded model cannot silently run on zeros.
+        if (!Ctx.SkipInit)
+            using (GradMode.NoGrad()) init.Fill(p, Backend, Ctx.Rng);
         if (!_parameters.ContainsKey(name)) _parameterOrder.Add(name);
         _parameters[name] = p;
         return p;

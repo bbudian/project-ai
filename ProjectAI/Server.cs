@@ -45,13 +45,14 @@ internal static class Server
         }
         if (!models.Contains(defaultModel)) defaultModel = models[0];
 
-        try
+        // Fail fast on a corrupt default checkpoint — but via a metadata-only read, NOT a full weight load. The
+        // server must come online (and register for discovery) in seconds; weights load lazily on first use.
+        // (The old full load here kept /health dark for minutes on a multi-GB model, so a client that had just
+        // spawned the server concluded it never came up.)
+        var defaultInfo = compute.ListModelInfos().FirstOrDefault(i => i.Name == defaultModel);
+        if (defaultInfo?.Error is { } metaError)
         {
-            compute.Resolve(defaultBackendId).Models.Get(defaultModel); // fail fast if the default checkpoint is corrupt
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"error: could not load default model '{defaultModel}': {ex.Message}");
+            Console.Error.WriteLine($"error: default model '{defaultModel}' is unusable: {metaError}");
             Environment.Exit(2);
         }
 
@@ -72,7 +73,7 @@ internal static class Server
             try { listener.TimeoutManager.EntityBody = TimeSpan.FromSeconds(30); } catch { /* unsupported config */ }
 
         string available = string.Join(", ", compute.AvailableBackends.Where(b => b.Available).Select(b => b.Id));
-        Console.WriteLine($"Models in '{modelsDirectory}': {string.Join(", ", models)}   (default: {defaultModel})");
+        Console.WriteLine($"Models in '{modelsDirectory}': {string.Join(", ", models)}   (default: {defaultModel}, loads on first use)");
         Console.WriteLine($"Backends available: {available}   (default: {defaultBackendId})");
         Console.WriteLine($"Serving on {prefix}  —  POST /generate, POST /tokenize, POST /train, GET /health, GET /models, WS /chat, PUT /shutdown  (Ctrl+C to stop)");
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; listener.Stop(); };

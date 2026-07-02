@@ -53,7 +53,10 @@ public static class Checkpointing
 
         ITokenizer tokenizer = TokenizerFromMeta(meta, path);
         var (step, _, dict) = Checkpoint.Load(path, backend, meta.ComputeDType);
-        var model = new LlamaModel(ParameterContext.Create(backend, 0, meta.ComputeDType), meta.Config);
+        // SkipInit: every parameter is overwritten from the checkpoint below (ApplyWeights throws on a missing
+        // one), so the eager Gaussian init would be a billion wasted draws on a large model — the dominant load cost.
+        var model = new LlamaModel(
+            ParameterContext.Create(backend, 0, meta.ComputeDType) with { SkipInit = true }, meta.Config);
         ApplyWeights(dict, model, backend);
         return (model, meta.Config, tokenizer, step);
     }
